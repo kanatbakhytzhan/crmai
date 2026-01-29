@@ -3,8 +3,6 @@ services:
   - type: pserv
     name: crm-db
     plan: free
-    databaseName: crmdb
-    databaseUser: crmuser
     ipAllowList: []  # Allow all connections
 
   # FastAPI Web Service (Free Tier)

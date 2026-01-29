@@ -1,10 +1,8 @@
 services:
-  # Managed PostgreSQL (Minimal Config)
   - type: pserv
     name: crm-db
     plan: free
 
-  # FastAPI Web Service
   - type: web
     name: crm-api
     runtime: python

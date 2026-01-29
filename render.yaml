@@ -1,46 +1,27 @@
 services:
-  # PostgreSQL Database (Free Tier)
+  # Managed PostgreSQL (Minimal Config)
   - type: pserv
     name: crm-db
     plan: free
-    ipAllowList: []  # Allow all connections
 
-  # FastAPI Web Service (Free Tier)
+  # FastAPI Web Service
   - type: web
     name: crm-api
     runtime: python
     plan: free
-    region: oregon  # Free tier region
+    region: oregon
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
-    healthCheckPath: /health
     envVars:
-      # Database connection (auto-linked from crm-db)
       - key: DATABASE_URL
         fromDatabase:
           name: crm-db
           property: connectionString
-      
-      # Python version
       - key: PYTHON_VERSION
-        value: "3.11.0"
-      
-      # JWT Secret Key (auto-generated)
+        value: 3.11.0
       - key: SECRET_KEY
         generateValue: true
-      
-      # Application settings
-      - key: DEV_MODE
-        value: "FALSE"
-      
-      # OpenAI API Key (manual input required)
       - key: OPENAI_API_KEY
         sync: false
-      
-      # Telegram Bot Token (manual input required)
       - key: TELEGRAM_BOT_TOKEN
-        sync: false
-      
-      # Telegram Chat ID (manual input required)
-      - key: TELEGRAM_CHAT_ID
         sync: false

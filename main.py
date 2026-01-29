@@ -11,10 +11,14 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from starlette.middleware.sessions import SessionMiddleware
 
-from app.database.session import init_db, drop_all_tables, engine, sync_engine
+from app.database.session import init_db, drop_all_tables, engine, sync_engine, Base
 from app.api.endpoints import chat, auth
 from app.services.telegram_service import stop_bot
 from app.admin import setup_admin
+
+# ВАЖНО: Импортируем модели, чтобы SQLAlchemy их зарегистрировал в Base.metadata
+# Без этого импорта таблицы не будут созданы!
+from app.database.models import User, BotUser, Message, Lead
 
 
 # Lifespan event handler для FastAPI

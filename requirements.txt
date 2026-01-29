@@ -1,0 +1,32 @@
+# FastAPI и сервер
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.12
+
+# Pydantic
+pydantic[email]>=2.10.0
+pydantic-settings>=2.6.0
+python-dotenv>=1.0.0
+
+# OpenAI API
+openai>=1.58.0
+
+# Telegram
+aiogram>=3.15.0
+
+# База данных (PostgreSQL - async)
+sqlalchemy[asyncio]>=2.0.36
+asyncpg>=0.30.0
+psycopg2-binary>=2.9.9  # Для Railway PostgreSQL (синхронный драйвер)
+aiosqlite>=0.20.0  # Для SQLite (локальная разработка)
+
+# Безопасность (JWT + Password Hashing)
+python-jose[cryptography]>=3.3.0
+passlib>=1.7.4
+bcrypt==4.0.1  # Совместимая версия с passlib
+
+# Админ-панель
+sqladmin[full]>=0.16.0
+
+# Email валидация (для Pydantic)
+email-validator>=2.0.0

@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <title>AI Менеджер</title>
+    
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+        
+        html, body {
+            height: 100%;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #d4d4d4;
+        }
+        
+        /* Desktop: Mobile frame in center */
+        .mobile-wrapper {
+            max-width: 480px;
+            height: 100vh;
+            margin: 0 auto;
+            background: white;
+            box-shadow: 0 0 40px rgba(0,0,0,0.2);
+            position: relative;
+        }
+        
+        /* Mobile: Full screen */
+        @media (max-width: 480px) {
+            html, body {
+                background: white;
+            }
+            .mobile-wrapper {
+                box-shadow: none;
+            }
+        }
+        
+        /* Main container (Flexbox column) */
+        .chat-app {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            position: relative;
+        }
+        
+        /* Header (Fixed top) */
+        .chat-header {
+            flex: none;
+            height: 60px;
+            background: #008069;
+            display: flex;
+            align-items: center;
+            padding: 0 12px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            position: relative;
+            z-index: 10;
+        }
+        
+        .header-avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #00b4d8, #0077b6);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: 600;
+            font-size: 18px;
+            margin-right: 12px;
+        }
+        
+        .header-info {
+            flex: 1;
+        }
+        
+        .header-name {
+            color: white;
+            font-size: 16px;
+            font-weight: 500;
+        }
+        
+        .header-status {
+            color: rgba(255,255,255,0.8);
+            font-size: 13px;
+        }
+        
+        .header-reset {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            background: transparent;
+            border: none;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 18px;
+            margin-left: 8px;
+        }
+        
+        .header-reset:hover {
+            background: rgba(255,255,255,0.1);
+        }
+        
+        .header-reset:active {
+            transform: scale(0.9);
+            background: rgba(255,255,255,0.2);
+        }
+        
+        /* Chat messages area (Flex grow + scroll) */
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            background: #efeae2;
+            background-image: 
+                repeating-linear-gradient(45deg, transparent, transparent 35px, rgba(0,0,0,.02) 35px, rgba(0,0,0,.02) 70px),
+                repeating-linear-gradient(-45deg, transparent, transparent 35px, rgba(0,0,0,.02) 35px, rgba(0,0,0,.02) 70px);
+            padding: 12px 8px 12px 8px;
+        }
+        
+        .chat-messages::-webkit-scrollbar {
+            width: 6px;
+        }
+        
+        .chat-messages::-webkit-scrollbar-thumb {
+            background: rgba(0,0,0,0.2);
+            border-radius: 3px;
+        }
+        
+        /* Message wrapper */
+        .message {
+            margin-bottom: 8px;
+            display: flex;
+            animation: slideUp 0.3s ease;
+        }
+        
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .message.bot {
+            justify-content: flex-start;
+        }
+        
+        .message.user {
+            justify-content: flex-end;
+        }
+        
+        /* Message bubble */
+        .bubble {
+            max-width: 75%;
+            padding: 6px 8px 8px 9px;
+            border-radius: 8px;
+            position: relative;
+            box-shadow: 0 1px 0.5px rgba(0,0,0,0.13);
+            word-wrap: break-word;
+        }
+        
+        .bubble.bot {
+            background: white;
+            border-radius: 8px 8px 8px 0;
+        }
+        
+        .bubble.bot::before {
+            content: '';
+            position: absolute;
+            left: -8px;
+            bottom: 0;
+            width: 0;
+            height: 0;
+            border-style: solid;
+            border-width: 0 8px 13px 0;
+            border-color: transparent white transparent transparent;
+        }
+        
+        .bubble.user {
+            background: #d9fdd3;
+            border-radius: 8px 8px 0 8px;
+        }
+        
+        .bubble.user::before {
+            content: '';
+            position: absolute;
+            right: -8px;
+            bottom: 0;
+            width: 0;
+            height: 0;
+            border-style: solid;
+            border-width: 0 0 13px 8px;
+            border-color: transparent transparent transparent #d9fdd3;
+        }
+        
+        .bubble.audio {
+            background: #d9fdd3;
+            border-radius: 8px 8px 0 8px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .bubble-text {
+            font-size: 14px;
+            line-height: 1.4;
+            color: #111b21;
+            margin-bottom: 4px;
+        }
+        
+        .bubble-footer {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 4px;
+            font-size: 11px;
+            color: rgba(0,0,0,0.45);
+        }
+        
+        .check-marks {
+            color: #53bdeb;
+            font-size: 15px;
+        }
+        
+        /* Typing indicator */
+        .typing {
+            padding: 10px 12px;
+        }
+        
+        .typing-dots {
+            display: flex;
+            gap: 4px;
+        }
+        
+        .typing-dots span {
+            width: 8px;
+            height: 8px;
+            background: #90949c;
+            border-radius: 50%;
+            animation: typing 1.4s infinite;
+        }
+        
+        .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+        .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+        
+        @keyframes typing {
+            0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+            30% { opacity: 1; transform: translateY(-8px); }
+        }
+        
+        /* Input area (Fixed bottom) */
+        .chat-input {
+            flex: none;
+            background: #f0f2f5;
+            padding: 8px 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            position: sticky;
+            bottom: 0;
+            z-index: 10;
+            box-shadow: 0 -1px 2px rgba(0,0,0,0.05);
+        }
+        
+        .input-wrapper {
+            flex: 1;
+            background: white;
+            border-radius: 21px;
+            padding: 8px 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .input-field {
+            flex: 1;
+            border: none;
+            outline: none;
+            font-size: 15px;
+            background: transparent;
+        }
+        
+        .input-field::placeholder {
+            color: #8696a0;
+        }
+        
+        /* Buttons */
+        .btn {
+            width: 42px;
+            height: 42px;
+            border-radius: 50%;
+            border: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 20px;
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: manipulation;
+        }
+        
+        .btn:active {
+            transform: scale(0.95);
+        }
+        
+        .btn-mic {
+            background: #008069;
+            color: white;
+        }
+        
+        .btn-mic.recording {
+            background: #dc3545;
+            animation: pulse 1.5s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% {
+                box-shadow: 0 0 0 0 rgba(220, 53, 69, 0.7);
+            }
+            50% {
+                box-shadow: 0 0 0 12px rgba(220, 53, 69, 0);
+            }
+        }
+        
+        .btn-emoji {
+            background: transparent;
+            color: #8696a0;
+        }
+        
+        /* Recording overlay */
+        .recording-overlay {
+            position: absolute;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.85);
+            color: white;
+            padding: 12px 20px;
+            border-radius: 24px;
+            display: none;
+            align-items: center;
+            gap: 12px;
+            z-index: 100;
+        }
+        
+        .recording-overlay.active {
+            display: flex;
+        }
+        
+        .wave {
+            display: flex;
+            gap: 3px;
+            align-items: center;
+        }
+        
+        .wave span {
+            width: 3px;
+            background: #ff3b3b;
+            border-radius: 2px;
+            animation: wave 1s infinite ease-in-out;
+        }
+        
+        .wave span:nth-child(1) { animation-delay: 0s; height: 10px; }
+        .wave span:nth-child(2) { animation-delay: 0.1s; height: 16px; }
+        .wave span:nth-child(3) { animation-delay: 0.2s; height: 20px; }
+        .wave span:nth-child(4) { animation-delay: 0.3s; height: 16px; }
+        .wave span:nth-child(5) { animation-delay: 0.4s; height: 10px; }
+        
+        @keyframes wave {
+            0%, 100% { height: 10px; }
+            50% { height: 24px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="mobile-wrapper">
+        <div class="chat-app">
+            <!-- Header -->
+            <div class="chat-header">
+                <div class="header-avatar">AI</div>
+                <div class="header-info">
+                    <div class="header-name">AI Менеджер</div>
+                    <div class="header-status">в сети</div>
+                </div>
+                <button id="resetBtn" class="header-reset" title="Начать заново">
+                    <i class="fas fa-sync-alt"></i>
+                </button>
+            </div>
+            
+            <!-- Messages -->
+            <div class="chat-messages" id="chatMessages">
+                <!-- Welcome message -->
+                <div class="message bot">
+                    <div class="bubble bot">
+                        <div class="bubble-text">
+                            Здравствуйте! 👋<br>
+                            Я AI-консультант по строительству. Расскажите о вашем проекте!
+                        </div>
+                        <div class="bubble-footer">
+                            <span id="welcomeTime"></span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Input -->
+            <div class="chat-input">
+                <form id="chatForm" style="display: flex; align-items: center; gap: 8px; width: 100%;">
+                    <div class="input-wrapper">
+                        <input 
+                            type="text" 
+                            id="messageInput" 
+                            class="input-field"
+                            placeholder="Сообщение"
+                        />
+                        <button type="button" class="btn-emoji">
+                            <i class="far fa-smile"></i>
+                        </button>
+                    </div>
+                    
+                    <button type="button" id="micBtn" class="btn btn-mic">
+                        <i class="fas fa-microphone"></i>
+                    </button>
+                </form>
+            </div>
+            
+            <!-- Recording overlay -->
+            <div id="recordingOverlay" class="recording-overlay">
+                <div class="wave">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                </div>
+                <span style="font-weight: 500;">Запись</span>
+                <span id="recordingTime">0:00</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Session ID
+        let sessionId = localStorage.getItem('session_id');
+        if (!sessionId) {
+            sessionId = 'web_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+            localStorage.setItem('session_id', sessionId);
+        }
+        
+        // Chat history
+        let chatHistory = JSON.parse(localStorage.getItem('chat_history') || '[]');
+        
+        // Elements
+        const chatMessages = document.getElementById('chatMessages');
+        const chatForm = document.getElementById('chatForm');
+        const messageInput = document.getElementById('messageInput');
+        const micBtn = document.getElementById('micBtn');
+        const recordingOverlay = document.getElementById('recordingOverlay');
+        const recordingTime = document.getElementById('recordingTime');
+        const resetBtn = document.getElementById('resetBtn');
+        
+        // Audio recording
+        let mediaRecorder = null;
+        let audioChunks = [];
+        let isRecording = false;
+        let recordingStartTime = null;
+        let recordingTimer = null;
+        
+        // Set welcome time
+        document.getElementById('welcomeTime').textContent = getCurrentTime();
+        
+        // Restore history
+        window.addEventListener('load', () => {
+            chatHistory.forEach(msg => {
+                if (msg.role === 'user') {
+                    addMessage(msg.content, 'user', false);
+                } else if (msg.role === 'audio') {
+                    addAudioMessage(false);
+                } else {
+                    addMessage(msg.content, 'bot', false);
+                }
+            });
+            scrollToBottom();
+        });
+        
+        // Get current time
+        function getCurrentTime() {
+            const now = new Date();
+            return now.getHours().toString().padStart(2, '0') + ':' + 
+                   now.getMinutes().toString().padStart(2, '0');
+        }
+        
+        // Add text message
+        function addMessage(text, role, save = true) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${role}`;
+            
+            const time = getCurrentTime();
+            const checkMarks = role === 'user' ? '<span class="check-marks">✓✓</span>' : '';
+            
+            messageDiv.innerHTML = `
+                <div class="bubble ${role}">
+                    <div class="bubble-text">${escapeHtml(text).replace(/\n/g, '<br>')}</div>
+                    <div class="bubble-footer">
+                        <span>${time}</span>
+                        ${checkMarks}
+                    </div>
+                </div>
+            `;
+            
+            chatMessages.appendChild(messageDiv);
+            scrollToBottom();
+            
+            if (save) {
+                chatHistory.push({ role, content: text });
+                localStorage.setItem('chat_history', JSON.stringify(chatHistory));
+            }
+        }
+        
+        // Add audio message
+        function addAudioMessage(save = true) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message user';
+            
+            const time = getCurrentTime();
+            
+            messageDiv.innerHTML = `
+                <div class="bubble audio">
+                    <i class="fas fa-microphone" style="color: #0b806f; font-size: 16px;"></i>
+                    <div style="flex: 1; font-weight: 500; font-size: 14px;">Голосовое</div>
+                    <div class="bubble-footer">
+                        <span>${time}</span>
+                        <span class="check-marks">✓✓</span>
+                    </div>
+                </div>
+            `;
+            
+            chatMessages.appendChild(messageDiv);
+            scrollToBottom();
+            
+            if (save) {
+                chatHistory.push({ role: 'audio', content: '[Audio]' });
+                localStorage.setItem('chat_history', JSON.stringify(chatHistory));
+            }
+        }
+        
+        // Typing indicator
+        function showTyping() {
+            const typingDiv = document.createElement('div');
+            typingDiv.id = 'typing';
+            typingDiv.className = 'message bot';
+            typingDiv.innerHTML = `
+                <div class="bubble bot typing">
+                    <div class="typing-dots">
+                        <span></span>
+                        <span></span>
+                        <span></span>
+                    </div>
+                </div>
+            `;
+            chatMessages.appendChild(typingDiv);
+            scrollToBottom();
+        }
+        
+        function hideTyping() {
+            const typing = document.getElementById('typing');
+            if (typing) typing.remove();
+        }
+        
+        function scrollToBottom() {
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+        
+        // Send text message
+        chatForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const message = messageInput.value.trim();
+            if (!message) return;
+            
+            addMessage(message, 'user');
+            messageInput.value = '';
+            
+            showTyping();
+            
+            try {
+                const formData = new FormData();
+                formData.append('user_id', sessionId);
+                formData.append('text', message);
+                
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                hideTyping();
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.response) {
+                        addMessage(data.response, 'bot');
+                    }
+                } else {
+                    addMessage('Извините, ошибка сервера.', 'bot');
+                }
+            } catch (error) {
+                hideTyping();
+                console.error('Error:', error);
+                addMessage('Ошибка соединения.', 'bot');
+            }
+        });
+        
+        // ===== AUDIO RECORDING =====
+        
+        function startRecording() {
+            if (isRecording) return;
+            
+            navigator.mediaDevices.getUserMedia({ audio: true })
+                .then(stream => {
+                    mediaRecorder = new MediaRecorder(stream);
+                    audioChunks = [];
+                    
+                    mediaRecorder.ondataavailable = (e) => {
+                        audioChunks.push(e.data);
+                    };
+                    
+                    mediaRecorder.onstop = async () => {
+                        const blob = new Blob(audioChunks, { type: 'audio/webm' });
+                        await sendAudio(blob);
+                        stream.getTracks().forEach(t => t.stop());
+                    };
+                    
+                    mediaRecorder.start();
+                    isRecording = true;
+                    
+                    micBtn.classList.add('recording');
+                    micBtn.innerHTML = '<i class="fas fa-stop"></i>';
+                    recordingOverlay.classList.add('active');
+                    
+                    recordingStartTime = Date.now();
+                    recordingTimer = setInterval(updateTimer, 100);
+                })
+                .catch(err => {
+                    console.error('Mic error:', err);
+                    alert('Не удалось получить доступ к микрофону');
+                });
+        }
+        
+        function stopRecording() {
+            if (!isRecording || !mediaRecorder) return;
+            
+            mediaRecorder.stop();
+            isRecording = false;
+            
+            micBtn.classList.remove('recording');
+            micBtn.innerHTML = '<i class="fas fa-microphone"></i>';
+            recordingOverlay.classList.remove('active');
+            
+            clearInterval(recordingTimer);
+            recordingTime.textContent = '0:00';
+        }
+        
+        function updateTimer() {
+            const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
+            const mins = Math.floor(elapsed / 60);
+            const secs = elapsed % 60;
+            recordingTime.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+        }
+        
+        async function sendAudio(blob) {
+            addAudioMessage();
+            showTyping();
+            
+            try {
+                const formData = new FormData();
+                formData.append('user_id', sessionId);
+                formData.append('audio_file', blob, 'voice.webm');
+                
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                hideTyping();
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.response) {
+                        addMessage(data.response, 'bot');
+                    }
+                } else {
+                    addMessage('Не удалось обработать аудио.', 'bot');
+                }
+            } catch (error) {
+                hideTyping();
+                console.error('Error:', error);
+                addMessage('Ошибка отправки аудио.', 'bot');
+            }
+        }
+        
+        // ===== EVENT LISTENERS (Touch + Mouse) =====
+        
+        function handleMicClick(e) {
+            e.preventDefault();
+            if (isRecording) {
+                stopRecording();
+            } else {
+                startRecording();
+            }
+        }
+        
+        micBtn.addEventListener('touchstart', handleMicClick, { passive: false });
+        micBtn.addEventListener('mousedown', handleMicClick);
+        
+        micBtn.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+        });
+        
+        // ===== RESET CHAT =====
+        
+        function resetChat() {
+            // Подтверждение
+            if (!confirm('Начать новый диалог? Текущая история будет удалена.')) {
+                return;
+            }
+            
+            // 1. Очистить localStorage
+            localStorage.removeItem('session_id');
+            localStorage.removeItem('chat_history');
+            
+            // 2. Сгенерировать новый session_id
+            sessionId = 'web_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+            localStorage.setItem('session_id', sessionId);
+            
+            // 3. Очистить массив истории
+            chatHistory = [];
+            
+            // 4. Очистить визуальный чат
+            chatMessages.innerHTML = '';
+            
+            // 5. Добавить приветственное сообщение
+            const welcomeDiv = document.createElement('div');
+            welcomeDiv.className = 'message bot';
+            welcomeDiv.innerHTML = `
+                <div class="bubble bot">
+                    <div class="bubble-text">
+                        Здравствуйте! 👋<br>
+                        Я AI-консультант по строительству. Расскажите о вашем проекте!
+                    </div>
+                    <div class="bubble-footer">
+                        <span>${getCurrentTime()}</span>
+                    </div>
+                </div>
+            `;
+            chatMessages.appendChild(welcomeDiv);
+            
+            // 6. Анимация кнопки (визуальная обратная связь)
+            resetBtn.style.transform = 'rotate(360deg)';
+            setTimeout(() => {
+                resetBtn.style.transform = 'rotate(0deg)';
+            }, 400);
+            
+            console.log('[RESET] New session started:', sessionId);
+        }
+        
+        resetBtn.addEventListener('click', resetChat);
+        
+        // Escape HTML
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>

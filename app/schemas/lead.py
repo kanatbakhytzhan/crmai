@@ -54,7 +54,15 @@ class LeadResponse(BaseModel):
     area: Optional[str] = None
     summary: Optional[str] = None
     language: str
-    status: str  # Изменено на str для совместимости
+    status: str  # "new", "in_progress", "done", "cancelled" — для CRM
     created_at: datetime
     
     model_config = {"from_attributes": True}
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def status_to_str(cls, v):
+        """Enum из БД приводим к строке для API/CRM."""
+        if hasattr(v, "value"):
+            return v.value
+        return str(v) if v is not None else "new"

@@ -23,3 +23,5 @@ services:
         sync: false
       - key: TELEGRAM_BOT_TOKEN
         sync: false
+      - key: DEFAULT_OWNER_ID
+        value: "1"

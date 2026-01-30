@@ -2,6 +2,7 @@
 Конфигурация приложения - загрузка переменных окружения
 """
 import os
+from typing import Optional
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
@@ -47,6 +48,10 @@ class Settings(BaseSettings):
     app_name: str = "AI Sales Manager SaaS"
     debug: bool = True
     dev_mode: str = "FALSE"  # TRUE - очистка БД при перезапуске
+    
+    # Guest mode: владелец лидов с веб-чата (без токена). Если задан — все гостевые лиды идут ему.
+    # На Render задайте DEFAULT_OWNER_ID=1 и убедитесь, что ваш аккаунт (kana) имеет id=1.
+    default_owner_id: Optional[int] = None
     
     class Config:
         env_file = ".env"

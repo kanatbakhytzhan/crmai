@@ -10,6 +10,7 @@ from typing import Optional
 from app.api.deps import get_db, get_current_user
 from app.database import crud
 from app.database.models import User
+from app.schemas.lead import LeadResponse
 from app.services import openai_service, telegram_service
 
 router = APIRouter()
@@ -52,8 +53,16 @@ async def chat(
             print(f"\n[*] Novoe soobshchenie ot user_id: {user_id}")
             print(f"[*] Owner ID: {owner_id} ({owner_name}) [Authenticated]")
         else:
-            # Гостевой режим - используем первого пользователя в системе
-            first_user = await crud.get_first_user(db)
+            # Гостевой режим: DEFAULT_OWNER_ID (если задан) или первый пользователь в БД
+            from app.core.config import get_settings
+            settings = get_settings()
+            if getattr(settings, "default_owner_id", None) is not None:
+                first_user = await crud.get_user_by_id(db, settings.default_owner_id)
+                if not first_user:
+                    print(f"[WARNING] DEFAULT_OWNER_ID={settings.default_owner_id} ne nayden v BD, ispolzuem get_first_user()")
+                    first_user = await crud.get_first_user(db)
+            else:
+                first_user = await crud.get_first_user(db)
             if not first_user:
                 raise HTTPException(
                     status_code=500,
@@ -165,7 +174,8 @@ async def chat(
                     summary=args.get("summary", "Быстрая заявка - требуется связаться"),
                     language=args["language"]
                 )
-                print(f"[OK] Lid sozdan s ID: {lead.id} (owner: {owner_id})")
+                # Диагностика: лид создан с owner_id и status=new — должен попасть в GET /api/leads для этого владельца
+                print(f"[OK] Lid sozdan: id={lead.id}, owner_id={lead.owner_id}, status={getattr(lead.status, 'value', lead.status)}")
                 
                 # Отправляем уведомление в Telegram
                 try:
@@ -232,7 +242,11 @@ async def get_leads(
     Multi-tenancy: Пользователь А не видит заявки Пользователя Б.
     """
     leads = await crud.get_user_leads(db, owner_id=current_user.id)
-    return {"leads": leads, "total": len(leads)}
+    # Диагностика: по какому владельцу фильтруем и сколько лидов найдено
+    print(f"[GET /api/leads] current_user.id={current_user.id}, email={current_user.email}, leads_count={len(leads)}")
+    # Сериализация через LeadResponse: status гарантированно строка ("new", "in_progress" и т.д.) для CRM
+    leads_data = [LeadResponse.model_validate(l) for l in leads]
+    return {"leads": leads_data, "total": len(leads_data)}
 
 
 @router.get("/leads/{lead_id}")

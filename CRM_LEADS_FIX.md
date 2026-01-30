@@ -8,23 +8,24 @@
 
 - GET /api/leads фильтрует по `owner_id = current_user.id`.
 - В гостевом режиме (без токена) владелец лида брался из `get_first_user()` — первый пользователь по `User.id ASC`.
-- Если в БД несколько пользователей или порядок другой, «первый» пользователь мог быть не тем, кто логинится в CRM (kana). Тогда лиды создавались с другим `owner_id`, и при запросе GET /api/leads под kana возвращался пустой список.
+- Если в БД несколько пользователей или порядок другой, «первый» пользователь мог быть не тем, кто логинится в CRM. Тогда лиды создавались с другим `owner_id`, и при запросе GET /api/leads под своим аккаунтом возвращался пустой список.
 
 ## Что сделано (минимальный патч)
 
-### 1. Гарантированный владелец для гостевых лидов
+### 1. Гарантированный владелец для гостевых лидов (по email)
 
 **Файл:** `app/core/config.py`
 
-- Добавлена опция `default_owner_id: Optional[int] = None`.
-- Если в env задан `DEFAULT_OWNER_ID` (например `1`), гостевые лиды всегда создаются с этим `owner_id`, а не «первым пользователем» из БД.
+- Добавлена опция `default_owner_email: Optional[str] = None`.
+- Если в env задан `DEFAULT_OWNER_EMAIL` (например `kana.bahytzhan@gmail.com`), гостевые лиды привязываются к пользователю с этим email, а не к «первому по id».
 
 **Файл:** `app/api/endpoints/chat.py`
 
 - В гостевом режиме:
-  - если задан `settings.default_owner_id`, берётся пользователь с этим id (`get_user_by_id`);
-  - если такого пользователя нет, используется прежняя логика `get_first_user()`.
-- Так лиды с веб-чата гарантированно привязываются к нужному аккаунту (например, kana с id=1).
+  - если задан `settings.default_owner_email`, ищется пользователь по email (`get_user_by_email`);
+  - если не найден — fallback на `get_first_user()`;
+  - если email не задан — как раньше, только `get_first_user()`.
+- Зависимость от того, что владелец должен иметь id=1, убрана: владелец определяется по email.
 
 ### 2. Диагностические логи
 
@@ -52,17 +53,16 @@
 
 **Файл:** `render.yaml`
 
-- В env веб-сервиса добавлена переменная `DEFAULT_OWNER_ID=1`.
-- На Render все гостевые лиды будут с `owner_id=1`. Нужно, чтобы аккаунт kana (kana.bahytzhan@gmail.com) был зарегистрирован первым и имел `id=1`.
+- В env веб-сервиса добавлена переменная `DEFAULT_OWNER_EMAIL` (sync: false — вводится вручную в дашборде).
+- На Render в Environment задайте `DEFAULT_OWNER_EMAIL=kana.bahytzhan@gmail.com` (или ваш email). Все гостевые лиды будут привязаны к этому пользователю по email; id=1 не требуется.
 
 ## Как проверить
 
-1. **Убедиться, что kana — пользователь с id=1**
-   - Зарегистрировать kana первым: POST /api/auth/register (email, password, company_name).
-   - Либо в БД: `SELECT id, email FROM users ORDER BY id;` — kana должен быть с `id=1`.
+1. **Пользователь с нужным email зарегистрирован**
+   - POST /api/auth/register (email, password, company_name) для вашего аккаунта, либо он уже есть в БД.
 
 2. **На Render**
-   - В Environment сервиса `crm-api` задать `DEFAULT_OWNER_ID=1` (если ещё не добавлено через render.yaml).
+   - В Environment сервиса `crm-api` задать `DEFAULT_OWNER_EMAIL=ваш@email.com` (тот же email, под которым логинитесь в CRM).
    - Задеплоить последнюю версию.
 
 3. **Создать лид через чат**
@@ -73,11 +73,11 @@
 4. **Проверить GET /api/leads**
    - Залогиниться: POST /api/auth/login (username=kana.bahytzhan@gmail.com, password=...).
    - Получить токен, затем: GET /api/leads с заголовком `Authorization: Bearer <token>`.
-   - Ожидание: в ответе хотя бы один лид (только что созданный), с `owner_id=1` и `status="new"`.
+   - Ожидание: в ответе хотя бы один лид (только что созданный), с `owner_id` вашего пользователя и `status="new"`.
 
 5. **Логи на Render**
-   - При создании лида: строка вида `[OK] Lid sozdan: id=..., owner_id=1, status=new`.
-   - При запросе лидов: строка вида `[GET /api/leads] current_user.id=1, email=kana.bahytzhan@gmail.com, leads_count=1`.
+   - При создании лида: строка вида `[OK] Lid sozdan: id=..., owner_id=..., status=new`.
+   - При запросе лидов: строка вида `[GET /api/leads] current_user.id=..., email=..., leads_count=1`.
 
 ## Ограничения (соблюдены)
 
@@ -87,6 +87,6 @@
 
 ## Итог
 
-- Гостевые лиды привязываются к владельцу по `DEFAULT_OWNER_ID` (на Render = 1).
-- GET /api/leads возвращает лиды по `current_user.id`; при id=1 для kana лиды из чата попадают в выдачу.
+- Гостевые лиды привязываются к владельцу по `DEFAULT_OWNER_EMAIL` (email пользователя, под которым вы логинитесь в CRM).
+- GET /api/leads возвращает лиды по `current_user.id`; лиды из чата попадают в выдачу тому, чей email задан в `DEFAULT_OWNER_EMAIL`.
 - В CRM (PWA) во вкладке «Необработанные» можно показывать лиды с `status === "new"` из ответа GET /api/leads.

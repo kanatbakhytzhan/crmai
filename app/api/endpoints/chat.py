@@ -53,13 +53,14 @@ async def chat(
             print(f"\n[*] Novoe soobshchenie ot user_id: {user_id}")
             print(f"[*] Owner ID: {owner_id} ({owner_name}) [Authenticated]")
         else:
-            # Гостевой режим: DEFAULT_OWNER_ID (если задан) или первый пользователь в БД
+            # Гостевой режим: DEFAULT_OWNER_EMAIL (если задан) или первый пользователь в БД
             from app.core.config import get_settings
             settings = get_settings()
-            if getattr(settings, "default_owner_id", None) is not None:
-                first_user = await crud.get_user_by_id(db, settings.default_owner_id)
+            default_email = getattr(settings, "default_owner_email", None)
+            if default_email:
+                first_user = await crud.get_user_by_email(db, email=default_email)
                 if not first_user:
-                    print(f"[WARNING] DEFAULT_OWNER_ID={settings.default_owner_id} ne nayden v BD, ispolzuem get_first_user()")
+                    print(f"[WARNING] DEFAULT_OWNER_EMAIL={default_email} ne nayden v BD, fallback na get_first_user()")
                     first_user = await crud.get_first_user(db)
             else:
                 first_user = await crud.get_first_user(db)

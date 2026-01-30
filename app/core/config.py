@@ -49,9 +49,9 @@ class Settings(BaseSettings):
     debug: bool = True
     dev_mode: str = "FALSE"  # TRUE - очистка БД при перезапуске
     
-    # Guest mode: владелец лидов с веб-чата (без токена). Если задан — все гостевые лиды идут ему.
-    # На Render задайте DEFAULT_OWNER_ID=1 и убедитесь, что ваш аккаунт (kana) имеет id=1.
-    default_owner_id: Optional[int] = None
+    # Guest mode: владелец лидов с веб-чата (без токена). Если задан email — все гостевые лиды идут этому пользователю.
+    # На Render задайте DEFAULT_OWNER_EMAIL=kana.bahytzhan@gmail.com (или ваш email).
+    default_owner_email: Optional[str] = None
     
     class Config:
         env_file = ".env"

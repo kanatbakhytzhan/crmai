@@ -5,10 +5,11 @@ import asyncio
 import threading
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.database.session import init_db, drop_all_tables, engine, sync_engine, Base
@@ -19,6 +20,16 @@ from app.admin import setup_admin
 # ВАЖНО: Импортируем модели, чтобы SQLAlchemy их зарегистрировал в Base.metadata
 # Без этого импорта таблицы не будут созданы!
 from app.database.models import User, BotUser, Message, Lead
+
+
+def _parse_cors_origins(raw: str | None) -> list[str]:
+    """CORS_ORIGINS: split by comma, trim spaces, ignore empty."""
+    if raw is None:
+        return []
+    s = (raw or "").strip()
+    if not s:
+        return []
+    return [o.strip() for o in s.split(",") if o.strip()]
 
 
 # Lifespan event handler для FastAPI
@@ -67,25 +78,22 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Session middleware (для админ-панели)
-# Используем тот же секретный ключ что и для JWT
+# Config and CORS — applied BEFORE routers so CORS runs on every request
 from app.core.config import get_settings
 _settings = get_settings()
 
+# CORS_ORIGINS: split by comma, trim spaces, ignore empty
+_origins_list = _parse_cors_origins(_settings.cors_origins)
+if not _origins_list:
+    _origins_list = ["https://buildcrm-pwa.vercel.app"]
+print(f"[CORS] Final parsed allowed origins: {_origins_list}")
+
+# Middleware order: last added = runs first. We want CORS first, then Session.
+# So add Session first, then CORSMiddleware (CORS runs first on request).
 app.add_middleware(
     SessionMiddleware,
-    secret_key=_settings.secret_key  # Тот же ключ что и для JWT!
+    secret_key=_settings.secret_key,
 )
-
-# CORS: обязательно список origins (с allow_credentials нельзя "*")
-_cors_origins = (_settings.cors_origins or "").strip()
-_origins_list = [o.strip() for o in _cors_origins.split(",") if o.strip()]
-if not _origins_list:
-    _origins_list = [
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "https://buildcrm-pwa.vercel.app",
-    ]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_origins_list,
@@ -94,6 +102,18 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
+
+
+class _LogOriginMiddleware(BaseHTTPMiddleware):
+    """Log request Origin for /api/* so Render logs show exact origin seen."""
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path.startswith("/api/"):
+            origin = request.headers.get("origin") or "(none)"
+            print(f"[CORS] Request Origin: {origin!r} | path={request.url.path} method={request.method}")
+        return await call_next(request)
+
+
+app.add_middleware(_LogOriginMiddleware)
 
 # Подключение статических файлов
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
@@ -115,13 +135,32 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Health check эндпоинт"""
+    """Health check эндпоинт (root)"""
     return {
         "status": "healthy",
         "version": "2.0.0",
         "database": "PostgreSQL",
         "auth": "JWT",
         "admin_panel": "/admin"
+    }
+
+
+@app.get("/api/health")
+async def api_health():
+    """Health check для API (без auth, для CORS/preflight проверки)"""
+    return {"ok": True, "status": "healthy"}
+
+
+@app.get("/api/debug/cors", include_in_schema=False)
+async def debug_cors(request: Request):
+    """Debug: request Origin vs allowed origins. Remove or protect after fix."""
+    origin = request.headers.get("origin") or "(none)"
+    allowed = list(_origins_list)
+    origin_allowed = origin in allowed if origin != "(none)" else False
+    return {
+        "request_origin": origin,
+        "allowed_origins": allowed,
+        "origin_allowed": origin_allowed,
     }
 
 

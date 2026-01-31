@@ -49,12 +49,25 @@ Base = declarative_base()
 
 async def init_db():
     """
-    Инициализировать базу данных (создать таблицы)
+    Инициализировать базу данных (создать таблицы + миграция is_admin при необходимости)
     """
+    from sqlalchemy import text
+    from app.core.config import get_settings
+    db_url = get_settings().database_url
+
     async with engine.begin() as conn:
         # Создаем все таблицы
         await conn.run_sync(Base.metadata.create_all)
-    
+        # PostgreSQL: добавить колонку is_admin если таблица users уже была без неё
+        if "postgresql" in db_url:
+            try:
+                await conn.execute(text(
+                    "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE"
+                ))
+                print("[OK] Kolonka is_admin proverena/dobavlena")
+            except Exception as e:
+                print(f"[WARN] is_admin migration: {type(e).__name__}: {e}")
+
     print("[OK] Baza dannyh initializirovana")
 
 

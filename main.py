@@ -77,11 +77,10 @@ app.add_middleware(
     secret_key=_settings.secret_key  # Тот же ключ что и для JWT!
 )
 
-# CORS middleware (список доменов; с allow_credentials нельзя использовать "*")
-_cors_origins = _settings.cors_origins
-if _cors_origins:
-    _origins_list = [o.strip() for o in _cors_origins.split(",") if o.strip()]
-else:
+# CORS: обязательно список origins (с allow_credentials нельзя "*")
+_cors_origins = (_settings.cors_origins or "").strip()
+_origins_list = [o.strip() for o in _cors_origins.split(",") if o.strip()]
+if not _origins_list:
     _origins_list = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
@@ -92,6 +91,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Подключение статических файлов

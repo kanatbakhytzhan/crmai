@@ -83,7 +83,8 @@ async def init_db():
                 print("[OK] Kolonka tenants.default_owner_user_id proverena/dobavlena")
             except Exception as e:
                 print(f"[WARN] tenants.default_owner_user_id migration: {type(e).__name__}: {e}")
-
+            # conversations / conversation_messages created via Base.metadata.create_all above
+            # (models must be imported in main.py). No ALTER needed for new tables.
     print("[OK] Baza dannyh initializirovana")
 
 

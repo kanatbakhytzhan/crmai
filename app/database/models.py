@@ -1,7 +1,8 @@
 """
 Модели базы данных (PostgreSQL)
 """
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Enum as SQLEnum, Boolean
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Enum as SQLEnum, Boolean, UniqueConstraint
+from sqlalchemy.types import JSON
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
@@ -37,6 +38,37 @@ class WhatsAppAccount(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     tenant = relationship("Tenant", back_populates="whatsapp_accounts")
+
+
+class Conversation(Base):
+    """Один чат (tenant + WA from). Keyed by (channel, phone_number_id, external_id)."""
+    __tablename__ = "conversations"
+    __table_args__ = (UniqueConstraint("channel", "phone_number_id", "external_id", name="uq_conversation_channel_phone_from"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True)
+    channel = Column(String, default="whatsapp", nullable=False)
+    external_id = Column(String, nullable=False)  # WA "from" number
+    phone_number_id = Column(String, nullable=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    messages = relationship("ConversationMessage", back_populates="conversation", cascade="all, delete-orphan")
+
+
+class ConversationMessage(Base):
+    """Одно сообщение в conversation (user / assistant / system)."""
+    __tablename__ = "conversation_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=False)
+    role = Column(String, nullable=False)  # "user" | "assistant" | "system"
+    text = Column(Text, nullable=False)
+    raw_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    conversation = relationship("Conversation", back_populates="messages")
 
 
 class LeadStatus(enum.Enum):

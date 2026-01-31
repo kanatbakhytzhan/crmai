@@ -1,6 +1,7 @@
 """
 WhatsApp webhook: verification (GET) и приём сообщений (POST).
 MULTITENANT_ENABLED / WHATSAPP_ENABLED управляют включением.
+Chat history: per (tenant_id + wa_from), last 20 messages as context for AI.
 """
 import logging
 import os
@@ -10,6 +11,7 @@ from fastapi.responses import PlainTextResponse
 from app.api.deps import get_db
 from app.core.config import get_settings
 from app.database import crud
+from app.services import openai_service
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
@@ -102,15 +104,38 @@ async def webhook_post(
                 print(f"[WA] webhook received phone_number_id={phone_number_id} tenant=not_found (no lead created)")
                 continue
             tenant_id = acc.tenant_id
-            messages = value.get("messages") or []
-            for msg in messages:
+            phone_number_id_str = str(phone_number_id)
+            messages_list = value.get("messages") or []
+            for msg in messages_list:
                 text = ""
                 if msg.get("type") == "text":
                     text = (msg.get("text") or {}).get("body") or ""
-                from_wa_id = msg.get("from")
+                from_wa_id = msg.get("from") or ""
                 lead = await crud.create_lead_from_whatsapp(db, tenant_id=tenant_id, message_text=text, from_wa_id=from_wa_id)
                 if lead:
-                    print(f"[WA] webhook received phone_number_id={phone_number_id} tenant={tenant_id} created lead id={lead.id}")
+                    log.info(f"[WA] webhook received phone_number_id={phone_number_id} tenant={tenant_id} created lead id={lead.id}")
                 else:
-                    print(f"[WA] webhook received phone_number_id={phone_number_id} tenant={tenant_id} created lead id=(failed)")
+                    log.info(f"[WA] webhook received phone_number_id={phone_number_id} tenant={tenant_id} created lead id=(failed)")
+
+                conv = await crud.get_or_create_conversation(
+                    db, tenant_id=tenant_id, phone_number_id=phone_number_id_str, wa_from=from_wa_id
+                )
+                await crud.add_conversation_message(db, conv.id, "user", text, raw_json=msg)
+                log.info(f"[WA][CHAT] conv_id={conv.id} tenant_id={tenant_id} from={from_wa_id} stored user msg")
+
+                last_msgs = await crud.get_last_messages(db, conv.id, limit=20)
+                log.info(f"[WA][CHAT] loaded {len(last_msgs)} context messages")
+                messages_for_gpt = [{"role": m.role, "content": m.text} for m in last_msgs]
+
+                assistant_reply = ""
+                try:
+                    response_text, function_call = await openai_service.chat_with_gpt(messages_for_gpt, use_functions=True)
+                    assistant_reply = response_text or ""
+                    if function_call and function_call.get("name") == "register_lead":
+                        assistant_reply = "[Lead registered]"
+                except Exception as e:
+                    log.warning(f"[WA][CHAT] AI error: {type(e).__name__}: {e}")
+                if assistant_reply:
+                    await crud.add_conversation_message(db, conv.id, "assistant", assistant_reply)
+                    log.info("[WA][CHAT] stored assistant msg")
     return {"ok": True}

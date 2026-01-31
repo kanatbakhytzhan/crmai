@@ -78,3 +78,14 @@ def test_webhook_verify_disabled(client):
 ```
 
 При `WHATSAPP_ENABLED=true` и правильном `hub.verify_token` ожидается 200 и тело challenge.
+
+## Chat history storage
+
+История чатов WhatsApp хранится в БД по ключу **tenant_id + wa_from** (номер отправителя).
+
+- **Таблицы:** `conversations` (один чат на пару tenant + номер отправителя), `conversation_messages` (роль, текст, created_at).
+- **Ключ:** `(channel, phone_number_id, external_id)` — один conversation на один номер бизнеса и одного отправителя.
+- **Контекст для AI:** при каждом входящем сообщении загружаются **последние 20 сообщений** (по `created_at` asc), передаются в GPT вместе с системным промптом и новым сообщением пользователя.
+- **Порядок:** user-сообщение сохраняется, затем загружается контекст (включая только что сохранённое), вызывается OpenAI, ответ ассистента сохраняется в `conversation_messages` с `role=assistant`.
+- **Логи:** `[WA][CHAT] conv_id=... tenant_id=... from=... stored user msg`, `[WA][CHAT] loaded N context messages`, `[WA][CHAT] stored assistant msg`.
+- Отправка ответа обратно в WhatsApp в этой версии не реализована — ответ только пишется в БД и в лог. Webhook всегда возвращает `{"ok": true}`; при ошибке AI лид по-прежнему создаётся, в лог пишется предупреждение.

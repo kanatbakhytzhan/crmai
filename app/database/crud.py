@@ -2,11 +2,15 @@
 CRUD операции для работы с базой данных (Async)
 """
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
 from datetime import datetime, timedelta
 
-from app.database.models import User, BotUser, Message, Lead, LeadStatus, Tenant, WhatsAppAccount
+from app.database.models import (
+    User, BotUser, Message, Lead, LeadStatus, Tenant, WhatsAppAccount,
+    Conversation, ConversationMessage,
+)
 from app.core.security import get_password_hash
 
 
@@ -448,6 +452,89 @@ async def delete_whatsapp_account(
     await db.delete(acc)
     await db.commit()
     return True
+
+
+# ========== WhatsApp conversation history (per tenant + wa_from) ==========
+
+async def get_or_create_conversation(
+    db: AsyncSession,
+    tenant_id: Optional[int],
+    phone_number_id: str,
+    wa_from: str,
+    channel: str = "whatsapp",
+) -> Conversation:
+    """Получить или создать conversation по (channel, phone_number_id, external_id). Retry on IntegrityError."""
+    phone_number_id = str(phone_number_id).strip()
+    wa_from = str(wa_from).strip()
+    for attempt in range(2):
+        result = await db.execute(
+            select(Conversation)
+            .where(Conversation.channel == channel)
+            .where(Conversation.phone_number_id == phone_number_id)
+            .where(Conversation.external_id == wa_from)
+        )
+        conv = result.scalar_one_or_none()
+        if conv:
+            return conv
+        try:
+            conv = Conversation(
+                tenant_id=tenant_id,
+                channel=channel,
+                external_id=wa_from,
+                phone_number_id=phone_number_id,
+            )
+            db.add(conv)
+            await db.commit()
+            await db.refresh(conv)
+            return conv
+        except IntegrityError:
+            await db.rollback()
+            if attempt == 0:
+                continue
+            raise
+    result = await db.execute(
+        select(Conversation)
+        .where(Conversation.channel == channel)
+        .where(Conversation.phone_number_id == phone_number_id)
+        .where(Conversation.external_id == wa_from)
+    )
+    conv = result.scalar_one_or_none()
+    if not conv:
+        raise RuntimeError("get_or_create_conversation: race failed")
+    return conv
+
+
+async def add_conversation_message(
+    db: AsyncSession,
+    conversation_id: int,
+    role: str,
+    text: str,
+    raw_json: Optional[dict] = None,
+) -> ConversationMessage:
+    """Добавить сообщение в conversation."""
+    msg = ConversationMessage(
+        conversation_id=conversation_id,
+        role=role,
+        text=text or "",
+        raw_json=raw_json,
+    )
+    db.add(msg)
+    await db.commit()
+    await db.refresh(msg)
+    return msg
+
+
+async def get_last_messages(
+    db: AsyncSession, conversation_id: int, limit: int = 20
+) -> List[ConversationMessage]:
+    """Последние limit сообщений (по created_at asc для контекста)."""
+    result = await db.execute(
+        select(ConversationMessage)
+        .where(ConversationMessage.conversation_id == conversation_id)
+        .order_by(ConversationMessage.created_at.asc())
+    )
+    all_rows = list(result.scalars().all())
+    return all_rows[-limit:] if len(all_rows) > limit else all_rows
 
 
 async def create_lead_from_whatsapp(

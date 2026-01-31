@@ -63,6 +63,7 @@ async def webhook_verify(request: Request, db: AsyncSession = Depends(get_db)):
     """
     Meta verification: принимаются оба формата — hub.mode / hub_mode,
     hub.verify_token / hub_verify_token, hub.challenge / hub_challenge.
+    Основной способ: сравнение с WHATSAPP_VERIFY_TOKEN (env). Если пустой — fallback на БД (LIMIT 1).
     """
     if not _whatsapp_enabled():
         return PlainTextResponse("disabled", status_code=404)
@@ -71,28 +72,20 @@ async def webhook_verify(request: Request, db: AsyncSession = Depends(get_db)):
     token = _qp(request, "hub.verify_token", "hub_verify_token")
     challenge = _qp(request, "hub.challenge", "hub_challenge")
 
-    print(f"[WA] verify: mode={mode!r}, has_token={bool(token)}, has_challenge={bool(challenge)}, token_mask={_mask_token(token) if token else '(none)'}")
-
-    env_token_for_log = (getattr(get_settings(), "whatsapp_verify_token", None) or os.environ.get("WHATSAPP_VERIFY_TOKEN")) or ""
-    env_token_for_log = (env_token_for_log or "").strip()
-    env_token_exists = bool(env_token_for_log)
-    env_match_for_log = bool(token and env_token_for_log and token == env_token_for_log)
-
     if mode != "subscribe":
-        print(f"[WA] verify: 400 mode={mode!r}, has_token={bool(token)}, has_challenge={bool(challenge)}, token_mask={_mask_token(token) if token else '(none)'}, env_token_exists={env_token_exists}, env_match={env_match_for_log}, db_match=False")
         return PlainTextResponse("bad request", status_code=400)
-    if not token:
-        print(f"[WA] verify: 400 mode={mode!r}, has_token=False, has_challenge={bool(challenge)}, token_mask=(none), env_token_exists={env_token_exists}, env_match=False, db_match=False")
-        return PlainTextResponse("bad request", status_code=400)
-    if not challenge:
-        print(f"[WA] verify: 400 mode={mode!r}, has_token={bool(token)}, has_challenge=False, token_mask={_mask_token(token) if token else '(none)'}, env_token_exists={env_token_exists}, env_match={env_match_for_log}, db_match=False")
+    if not token or not challenge:
         return PlainTextResponse("bad request", status_code=400)
 
     env_token = (getattr(get_settings(), "whatsapp_verify_token", None) or os.environ.get("WHATSAPP_VERIFY_TOKEN"))
     env_token = (env_token or "").strip()
-    if env_token and token == env_token:
-        print(f"[WA] verify: env_ok, challenge_len={len(challenge)}")
-        return PlainTextResponse(challenge, status_code=200)
+
+    if env_token:
+        if token == env_token:
+            print(f"[WA] verify ok token_mask={_mask_token(token)}")
+            return PlainTextResponse(challenge, status_code=200)
+        print(f"[WA] verify forbidden token_mask={_mask_token(token)}")
+        return PlainTextResponse("forbidden", status_code=403)
 
     try:
         from sqlalchemy import select
@@ -102,15 +95,16 @@ async def webhook_verify(request: Request, db: AsyncSession = Depends(get_db)):
             select(WhatsAppAccount)
             .where(WhatsAppAccount.verify_token == token)
             .where(WhatsAppAccount.is_active == True)
+            .limit(1)
         )
-        acc = r.scalar_one_or_none()
+        acc = r.scalars().first()
         if acc:
-            print(f"[WA] verify: db_ok, challenge_len={len(challenge)}")
+            print(f"[WA] verify ok token_mask={_mask_token(token)}")
             return PlainTextResponse(challenge, status_code=200)
     except Exception as e:
-        print(f"[WA] verify: db_error {type(e).__name__}: {e}")
+        print(f"[WA] verify db_error {type(e).__name__}: {e}")
 
-    print(f"[WA] verify: 403 mode={mode!r}, has_token={bool(token)}, has_challenge={bool(challenge)}, token_mask={_mask_token(token) if token else '(none)'}, env_token_exists={env_token_exists}, env_match=False, db_match=False")
+    print(f"[WA] verify forbidden token_mask={_mask_token(token)}")
     return PlainTextResponse("forbidden", status_code=403)
 
 

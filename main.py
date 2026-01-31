@@ -84,6 +84,7 @@ if not _origins_list:
     _origins_list = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "https://buildcrm-pwa.vercel.app",
     ]
 app.add_middleware(
     CORSMiddleware,

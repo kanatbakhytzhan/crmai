@@ -9,6 +9,35 @@ import enum
 from app.database.session import Base
 
 
+class Tenant(Base):
+    """Клиент (tenant) для multi-tenant по WhatsApp."""
+    __tablename__ = "tenants"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    slug = Column(String, unique=True, index=True, nullable=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    whatsapp_accounts = relationship("WhatsAppAccount", back_populates="tenant", cascade="all, delete-orphan")
+
+
+class WhatsAppAccount(Base):
+    """Привязанный к tenant WhatsApp номер (phone_number_id от Meta)."""
+    __tablename__ = "whatsapp_accounts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    phone_number = Column(String, nullable=False)
+    phone_number_id = Column(String, unique=True, index=True, nullable=False)
+    waba_id = Column(String, nullable=True)
+    verify_token = Column(String, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    tenant = relationship("Tenant", back_populates="whatsapp_accounts")
+
+
 class LeadStatus(enum.Enum):
     """Статусы лида"""
     NEW = "new"
@@ -80,6 +109,7 @@ class Lead(Base):
     id = Column(Integer, primary_key=True, index=True)
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)  # Владелец заявки
     bot_user_id = Column(Integer, ForeignKey("bot_users.id"), nullable=False)  # Клиент
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True)  # Multi-tenant (WhatsApp)
     
     name = Column(String, nullable=False)
     phone = Column(String, nullable=False)

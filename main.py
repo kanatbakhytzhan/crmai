@@ -16,13 +16,13 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.database.session import init_db, drop_all_tables, engine, sync_engine, Base
-from app.api.endpoints import chat, auth, admin_users
+from app.api.endpoints import chat, auth, admin_users, admin_tenants, whatsapp_webhook
 from app.services.telegram_service import stop_bot
 from app.admin import setup_admin
 
 # ВАЖНО: Импортируем модели, чтобы SQLAlchemy их зарегистрировал в Base.metadata
 # Без этого импорта таблицы не будут созданы!
-from app.database.models import User, BotUser, Message, Lead
+from app.database.models import User, BotUser, Message, Lead, Tenant, WhatsAppAccount
 from app.api.deps import get_db
 from app.api.endpoints import auth as auth_endpoints
 from app.schemas.auth import Token
@@ -154,6 +154,8 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
 app.include_router(chat.router, prefix="/api", tags=["Chat"])
 app.include_router(admin_users.router, prefix="/api/admin", tags=["Admin Users"])
+app.include_router(admin_tenants.router, prefix="/api/admin", tags=["Admin Tenants"])
+app.include_router(whatsapp_webhook.router, prefix="/api/whatsapp", tags=["WhatsApp Webhook"])
 
 # Подключение админ-панели (используем СИНХРОННЫЙ engine!)
 setup_admin(app, sync_engine)

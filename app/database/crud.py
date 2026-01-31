@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
 from datetime import datetime, timedelta
 
-from app.database.models import User, BotUser, Message, Lead, LeadStatus
+from app.database.models import User, BotUser, Message, Lead, LeadStatus, Tenant, WhatsAppAccount
 from app.core.security import get_password_hash
 
 
@@ -275,3 +275,115 @@ async def delete_lead(db: AsyncSession, lead_id: int, owner_id: int) -> bool:
         await db.commit()
         return True
     return False
+
+
+# ========== TENANT (multi-tenant) ==========
+
+async def create_tenant(db: AsyncSession, name: str, slug: str) -> Tenant:
+    """Создать tenant."""
+    tenant = Tenant(name=name, slug=slug.strip().lower())
+    db.add(tenant)
+    await db.commit()
+    await db.refresh(tenant)
+    return tenant
+
+
+async def get_tenant_by_id(db: AsyncSession, tenant_id: int) -> Optional[Tenant]:
+    """Получить tenant по ID."""
+    result = await db.execute(select(Tenant).where(Tenant.id == tenant_id))
+    return result.scalar_one_or_none()
+
+
+async def get_tenant_by_slug(db: AsyncSession, slug: str) -> Optional[Tenant]:
+    """Получить tenant по slug."""
+    result = await db.execute(select(Tenant).where(Tenant.slug == slug.strip().lower()))
+    return result.scalar_one_or_none()
+
+
+async def list_tenants(db: AsyncSession, active_only: bool = False) -> List[Tenant]:
+    """Список tenants."""
+    q = select(Tenant).order_by(Tenant.id.asc())
+    if active_only:
+        q = q.where(Tenant.is_active == True)
+    result = await db.execute(q)
+    return list(result.scalars().all())
+
+
+# ========== WHATSAPP ACCOUNT ==========
+
+async def create_whatsapp_account(
+    db: AsyncSession,
+    tenant_id: int,
+    phone_number: str,
+    phone_number_id: str,
+    verify_token: Optional[str] = None,
+    waba_id: Optional[str] = None,
+) -> WhatsAppAccount:
+    """Привязать WhatsApp номер к tenant."""
+    acc = WhatsAppAccount(
+        tenant_id=tenant_id,
+        phone_number=phone_number,
+        phone_number_id=phone_number_id,
+        verify_token=verify_token,
+        waba_id=waba_id,
+    )
+    db.add(acc)
+    await db.commit()
+    await db.refresh(acc)
+    return acc
+
+
+async def get_whatsapp_account_by_phone_number_id(
+    db: AsyncSession, phone_number_id: str
+) -> Optional[WhatsAppAccount]:
+    """Найти WhatsApp account по phone_number_id (для webhook)."""
+    result = await db.execute(
+        select(WhatsAppAccount)
+        .where(WhatsAppAccount.phone_number_id == str(phone_number_id))
+        .where(WhatsAppAccount.is_active == True)
+    )
+    return result.scalar_one_or_none()
+
+
+async def list_whatsapp_accounts_by_tenant(
+    db: AsyncSession, tenant_id: int
+) -> List[WhatsAppAccount]:
+    """Список WhatsApp номеров tenant."""
+    result = await db.execute(
+        select(WhatsAppAccount).where(WhatsAppAccount.tenant_id == tenant_id).order_by(WhatsAppAccount.id.asc())
+    )
+    return list(result.scalars().all())
+
+
+async def create_lead_from_whatsapp(
+    db: AsyncSession,
+    tenant_id: int,
+    message_text: str,
+    from_wa_id: Optional[str] = None,
+) -> Optional[Lead]:
+    """
+    Создать лид из webhook WhatsApp. Использует первого пользователя как owner и создаёт BotUser wa_{wa_id}.
+    """
+    tenant = await get_tenant_by_id(db, tenant_id)
+    if not tenant:
+        return None
+    first_user = await get_first_user(db)
+    if not first_user:
+        return None
+    owner_id = first_user.id
+    wa_user_id = f"wa_{from_wa_id}" if from_wa_id else "wa_unknown"
+    bot_user = await get_or_create_bot_user(db, user_id=wa_user_id, owner_id=owner_id)
+    lead = Lead(
+        owner_id=owner_id,
+        bot_user_id=bot_user.id,
+        tenant_id=tenant_id,
+        name="WhatsApp",
+        phone=from_wa_id or "unknown",
+        summary=message_text or "(no text)",
+        language="ru",
+        status=LeadStatus.NEW,
+    )
+    db.add(lead)
+    await db.commit()
+    await db.refresh(lead)
+    return lead

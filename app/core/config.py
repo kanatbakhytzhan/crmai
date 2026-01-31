@@ -59,6 +59,11 @@ class Settings(BaseSettings):
     # На Render задайте CORS_ORIGINS с вашим прод-доменом PWA.
     cors_origins: Optional[str] = None
     
+    # Multi-tenant + WhatsApp (подготовка)
+    multitenant_enabled: str = "false"  # "true" — фильтр лидов по tenant
+    whatsapp_enabled: str = "false"     # "true" — включить webhook WhatsApp
+    whatsapp_verify_token: Optional[str] = None  # Fallback для Meta verification
+    
     class Config:
         env_file = ".env"
         case_sensitive = False

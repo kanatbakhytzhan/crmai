@@ -106,3 +106,17 @@ async def list_whatsapp(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
     accounts = await crud.list_whatsapp_accounts_by_tenant(db, tenant_id)
     return {"accounts": [WhatsAppAccountResponse.model_validate(a) for a in accounts], "total": len(accounts)}
+
+
+@router.delete("/tenants/{tenant_id}/whatsapps/{whatsapp_id}")
+async def delete_tenant_whatsapp(
+    tenant_id: int,
+    whatsapp_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin),
+):
+    """Удалить WhatsApp номер у tenant (только если tenant_id совпадает)."""
+    deleted = await crud.delete_whatsapp_account(db, tenant_id=tenant_id, whatsapp_id=whatsapp_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="WhatsApp account not found or tenant mismatch")
+    return {"ok": True}

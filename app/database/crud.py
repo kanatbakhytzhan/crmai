@@ -435,6 +435,21 @@ async def list_whatsapp_accounts_by_tenant(
     return list(result.scalars().all())
 
 
+async def delete_whatsapp_account(
+    db: AsyncSession, tenant_id: int, whatsapp_id: int
+) -> bool:
+    """Удалить whatsapp_account по id только если tenant_id совпадает. Возвращает True если удалён."""
+    result = await db.execute(
+        select(WhatsAppAccount).where(WhatsAppAccount.id == whatsapp_id).where(WhatsAppAccount.tenant_id == tenant_id)
+    )
+    acc = result.scalar_one_or_none()
+    if not acc:
+        return False
+    await db.delete(acc)
+    await db.commit()
+    return True
+
+
 async def create_lead_from_whatsapp(
     db: AsyncSession,
     tenant_id: int,

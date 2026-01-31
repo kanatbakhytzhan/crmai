@@ -537,6 +537,25 @@ async def get_last_messages(
     return all_rows[-limit:] if len(all_rows) > limit else all_rows
 
 
+async def trim_conversation_messages(
+    db: AsyncSession, conversation_id: int, keep_last: int = 50
+) -> int:
+    """Удалить старые сообщения, оставив только последние keep_last. Возвращает число удалённых."""
+    result = await db.execute(
+        select(ConversationMessage)
+        .where(ConversationMessage.conversation_id == conversation_id)
+        .order_by(ConversationMessage.created_at.asc())
+    )
+    all_rows = list(result.scalars().all())
+    if len(all_rows) <= keep_last:
+        return 0
+    to_delete = all_rows[: len(all_rows) - keep_last]
+    for msg in to_delete:
+        await db.delete(msg)
+    await db.commit()
+    return len(to_delete)
+
+
 async def create_lead_from_whatsapp(
     db: AsyncSession,
     tenant_id: int,

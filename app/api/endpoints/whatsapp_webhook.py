@@ -11,7 +11,7 @@ from fastapi.responses import PlainTextResponse
 from app.api.deps import get_db
 from app.core.config import get_settings
 from app.database import crud
-from app.services import openai_service
+from app.services import openai_service, conversation_service
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
@@ -117,15 +117,14 @@ async def webhook_post(
                 else:
                     log.info(f"[WA] webhook received phone_number_id={phone_number_id} tenant={tenant_id} created lead id=(failed)")
 
-                conv = await crud.get_or_create_conversation(
-                    db, tenant_id=tenant_id, phone_number_id=phone_number_id_str, wa_from=from_wa_id
+                conv = await conversation_service.get_or_create_conversation(
+                    db, tenant_id=tenant_id, channel="whatsapp", external_id=from_wa_id, phone_number_id=phone_number_id_str
                 )
-                await crud.add_conversation_message(db, conv.id, "user", text, raw_json=msg)
+                await conversation_service.append_user_message(db, conv.id, text, raw_json=msg)
                 log.info(f"[WA][CHAT] conv_id={conv.id} tenant_id={tenant_id} from={from_wa_id} stored user msg")
 
-                last_msgs = await crud.get_last_messages(db, conv.id, limit=20)
-                log.info(f"[WA][CHAT] loaded {len(last_msgs)} context messages")
-                messages_for_gpt = [{"role": m.role, "content": m.text} for m in last_msgs]
+                messages_for_gpt = await conversation_service.build_context_messages(db, conv.id, limit=20)
+                log.info(f"[WA][CHAT] loaded {len(messages_for_gpt)} context messages")
 
                 assistant_reply = ""
                 try:
@@ -136,6 +135,6 @@ async def webhook_post(
                 except Exception as e:
                     log.warning(f"[WA][CHAT] AI error: {type(e).__name__}: {e}")
                 if assistant_reply:
-                    await crud.add_conversation_message(db, conv.id, "assistant", assistant_reply)
+                    await conversation_service.append_assistant_message(db, conv.id, assistant_reply)
                     log.info("[WA][CHAT] stored assistant msg")
     return {"ok": True}

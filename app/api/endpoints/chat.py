@@ -1,9 +1,10 @@
 """
 API эндпоинты для чата с AI
+Unified conversation history: DB-backed per (channel, external_id). Web channel uses email or guest:<ip>.
 """
 import os
 import tempfile
-from fastapi import APIRouter, Depends, HTTPException, Form, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Form, UploadFile, File, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
@@ -12,13 +13,14 @@ from app.core.config import get_settings
 from app.database import crud
 from app.database.models import User
 from app.schemas.lead import LeadResponse
-from app.services import openai_service, telegram_service
+from app.services import openai_service, telegram_service, conversation_service
 
 router = APIRouter()
 
 
 @router.post("/chat")
 async def chat(
+    request: Request,
     user_id: str = Form(...),  # ID клиента (session_id для гостей)
     text: Optional[str] = Form(None),
     audio_file: Optional[UploadFile] = File(None),
@@ -116,16 +118,20 @@ async def chat(
                     os.remove(tmp_file_path)
                     print(f"[*] Vremennyy fail udalen")
         
-        # 3. Сохраняем сообщение клиента в БД
-        print(f"[*] Sohranenie soobshcheniya v BD (length: {len(message_text)})")
-        await crud.create_message(db, bot_user.id, "user", message_text)
-        
-        # 4. Получаем историю диалога
-        history = await crud.get_bot_user_messages(db, bot_user.id, limit=20)
-        messages = openai_service.format_messages_for_gpt(history)
-        print(f"[*] Zagruzhenno soobshcheniy iz istorii: {len(messages)}")
-        
-        # 5. Отправляем в GPT-4o
+        # 3. Conversation history (unified engine): identify session
+        if current_user:
+            external_id = current_user.email or str(current_user.id)
+        else:
+            client_host = getattr(request.client, "host", None) or "unknown"
+            external_id = f"guest:{client_host}"
+        conv = await conversation_service.get_or_create_conversation(
+            db, tenant_id=None, channel="web", external_id=external_id, phone_number_id=None
+        )
+        await conversation_service.append_user_message(db, conv.id, message_text)
+        messages = await conversation_service.build_context_messages(db, conv.id, limit=20)
+        print(f"[*] Zagruzhenno soobshcheniy iz istorii (conv_id={conv.id}): {len(messages)}")
+
+        # 4. Отправляем в GPT-4o
         print(f"[*] Otpravka v GPT-4o...")
         try:
             response_text, function_call = await openai_service.chat_with_gpt(messages)
@@ -138,8 +144,8 @@ async def chat(
                 status_code=500,
                 detail="Izvините, proisoshla oshibka. Poprobuite eshe raz."
             )
-        
-        # 6. Обрабатываем Function Call (если есть)
+
+        # 5. Обрабатываем Function Call (если есть)
         if function_call and function_call["name"] == "register_lead":
             print(f"[*] Function call: register_lead")
             args = function_call["arguments"]
@@ -207,11 +213,11 @@ async def chat(
                         f"по номеру {args['phone']} в ближайшее время."
                     )
         
-        # 7. Сохраняем ответ бота в БД
+        # 6. Сохраняем ответ в conversation (unified history)
         if response_text:
-            await crud.create_message(db, bot_user.id, "assistant", response_text)
-        
-        # 8. Возвращаем ответ
+            await conversation_service.append_assistant_message(db, conv.id, response_text)
+
+        # 7. Возвращаем ответ
         print(f"[OK] Uspeshno obrabotano\n")
         return {
             "status": "success",

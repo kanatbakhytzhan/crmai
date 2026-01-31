@@ -79,13 +79,12 @@ def test_webhook_verify_disabled(client):
 
 При `WHATSAPP_ENABLED=true` и правильном `hub.verify_token` ожидается 200 и тело challenge.
 
-## Chat history storage
+## Chat history storage (unified engine)
 
-История чатов WhatsApp хранится в БД по ключу **tenant_id + wa_from** (номер отправителя).
+История чатов WhatsApp и веб-чата хранится в БД через **unified conversation engine** (`app/services/conversation_service.py`). Ключ: **tenant_id + channel + external_id** (+ phone_number_id для WhatsApp). Подробнее: [CONVERSATIONS.md](CONVERSATIONS.md).
 
-- **Таблицы:** `conversations` (один чат на пару tenant + номер отправителя), `conversation_messages` (роль, текст, created_at).
-- **Ключ:** `(channel, phone_number_id, external_id)` — один conversation на один номер бизнеса и одного отправителя.
-- **Контекст для AI:** при каждом входящем сообщении загружаются **последние 20 сообщений** (по `created_at` asc), передаются в GPT вместе с системным промптом и новым сообщением пользователя.
-- **Порядок:** user-сообщение сохраняется, затем загружается контекст (включая только что сохранённое), вызывается OpenAI, ответ ассистента сохраняется в `conversation_messages` с `role=assistant`.
+- **WhatsApp:** channel=`whatsapp`, external_id=номер отправителя (wa_from), phone_number_id=бизнес-номер. Один conversation на (tenant + номер отправителя).
+- **Таблицы:** `conversations`, `conversation_messages`. Контекст для AI — последние 20 сообщений (build_context_messages).
+- **Порядок:** append_user_message → build_context_messages → OpenAI → append_assistant_message.
 - **Логи:** `[WA][CHAT] conv_id=... tenant_id=... from=... stored user msg`, `[WA][CHAT] loaded N context messages`, `[WA][CHAT] stored assistant msg`.
-- Отправка ответа обратно в WhatsApp в этой версии не реализована — ответ только пишется в БД и в лог. Webhook всегда возвращает `{"ok": true}`; при ошибке AI лид по-прежнему создаётся, в лог пишется предупреждение.
+- Отправка ответа обратно в WhatsApp не реализована — ответ только в БД и лог. Webhook всегда возвращает `{"ok": true}`; при ошибке AI лид создаётся, в лог пишется предупреждение.

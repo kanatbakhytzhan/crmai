@@ -51,10 +51,17 @@ def _qp(request: Request, *keys: str) -> str | None:
     return None
 
 
+def _mask_token(token: str) -> str:
+    """Маска токена для логов: первые 3 + *** + последние 2 (без полного секрета)."""
+    if not token or len(token) <= 5:
+        return "***" if token else "(empty)"
+    return token[:3] + "***" + token[-2:]
+
+
 @router.get("/webhook")
 async def webhook_verify(request: Request, db: AsyncSession = Depends(get_db)):
     """
-    Meta verification: поддерживаются оба формата параметров — hub.mode / hub_mode,
+    Meta verification: принимаются оба формата — hub.mode / hub_mode,
     hub.verify_token / hub_verify_token, hub.challenge / hub_challenge.
     """
     if not _whatsapp_enabled():
@@ -64,17 +71,27 @@ async def webhook_verify(request: Request, db: AsyncSession = Depends(get_db)):
     token = _qp(request, "hub.verify_token", "hub_verify_token")
     challenge = _qp(request, "hub.challenge", "hub_challenge")
 
-    if mode != "subscribe":
-        return PlainTextResponse("bad request: mode must be subscribe", status_code=400)
-    if not token:
-        return PlainTextResponse("bad request: verify_token required", status_code=400)
-    if not challenge:
-        return PlainTextResponse("bad request: challenge required", status_code=400)
+    print(f"[WA] verify: mode={mode!r}, has_token={bool(token)}, has_challenge={bool(challenge)}, token_mask={_mask_token(token) if token else '(none)'}")
 
-    settings = get_settings()
-    expected = getattr(settings, "whatsapp_verify_token", None) or os.environ.get("WHATSAPP_VERIFY_TOKEN")
-    if expected and token == expected:
-        print(f"[WA] verify ok: mode={mode!r}, token_source=env, challenge_len={len(challenge)}")
+    env_token_for_log = (getattr(get_settings(), "whatsapp_verify_token", None) or os.environ.get("WHATSAPP_VERIFY_TOKEN")) or ""
+    env_token_for_log = (env_token_for_log or "").strip()
+    env_token_exists = bool(env_token_for_log)
+    env_match_for_log = bool(token and env_token_for_log and token == env_token_for_log)
+
+    if mode != "subscribe":
+        print(f"[WA] verify: 400 mode={mode!r}, has_token={bool(token)}, has_challenge={bool(challenge)}, token_mask={_mask_token(token) if token else '(none)'}, env_token_exists={env_token_exists}, env_match={env_match_for_log}, db_match=False")
+        return PlainTextResponse("bad request", status_code=400)
+    if not token:
+        print(f"[WA] verify: 400 mode={mode!r}, has_token=False, has_challenge={bool(challenge)}, token_mask=(none), env_token_exists={env_token_exists}, env_match=False, db_match=False")
+        return PlainTextResponse("bad request", status_code=400)
+    if not challenge:
+        print(f"[WA] verify: 400 mode={mode!r}, has_token={bool(token)}, has_challenge=False, token_mask={_mask_token(token) if token else '(none)'}, env_token_exists={env_token_exists}, env_match={env_match_for_log}, db_match=False")
+        return PlainTextResponse("bad request", status_code=400)
+
+    env_token = (getattr(get_settings(), "whatsapp_verify_token", None) or os.environ.get("WHATSAPP_VERIFY_TOKEN"))
+    env_token = (env_token or "").strip()
+    if env_token and token == env_token:
+        print(f"[WA] verify: env_ok, challenge_len={len(challenge)}")
         return PlainTextResponse(challenge, status_code=200)
 
     try:
@@ -88,11 +105,12 @@ async def webhook_verify(request: Request, db: AsyncSession = Depends(get_db)):
         )
         acc = r.scalar_one_or_none()
         if acc:
-            print(f"[WA] verify ok: mode={mode!r}, token_source=db, challenge_len={len(challenge)}")
+            print(f"[WA] verify: db_ok, challenge_len={len(challenge)}")
             return PlainTextResponse(challenge, status_code=200)
     except Exception as e:
-        print(f"[WA] verify db check failed: {type(e).__name__}: {e}")
+        print(f"[WA] verify: db_error {type(e).__name__}: {e}")
 
+    print(f"[WA] verify: 403 mode={mode!r}, has_token={bool(token)}, has_challenge={bool(challenge)}, token_mask={_mask_token(token) if token else '(none)'}, env_token_exists={env_token_exists}, env_match=False, db_match=False")
     return PlainTextResponse("forbidden", status_code=403)
 
 

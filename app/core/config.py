@@ -53,8 +53,11 @@ class Settings(BaseSettings):
     default_owner_email: Optional[str] = None
     
     # Админка: emails, которые считаются админами (без is_admin в БД). Формат: "email1,email2"
-    # На Render задайте ADMIN_EMAILS=kana.bahytzhan@gmail.com для первого суперадмина.
     admin_emails: Optional[str] = None
+    
+    # CORS: разрешённые origins для CRM/админки. Формат: "http://localhost:5173,https://my-pwa.com"
+    # На Render задайте CORS_ORIGINS с вашим прод-доменом PWA.
+    cors_origins: Optional[str] = None
     
     class Config:
         env_file = ".env"

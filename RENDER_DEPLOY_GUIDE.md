@@ -69,7 +69,8 @@ uvicorn main:app --host 0.0.0.0 --port $PORT
 - ⚠️ `OPENAI_API_KEY` - нужно ввести вручную
 - ⚠️ `TELEGRAM_BOT_TOKEN` - нужно ввести вручную
 - ⚠️ `TELEGRAM_CHAT_ID` - нужно ввести вручную
-- ⚠️ `DEFAULT_OWNER_EMAIL` - email пользователя, которому привязываются гостевые лиды с веб-чата (например `kana.bahytzhan@gmail.com`)
+- ⚠️ `DEFAULT_OWNER_EMAIL` - email пользователя, которому привязываются гостевые лиды с веб-чата
+- ⚠️ `CORS_ORIGINS` - разрешённые origins для CRM/админки (через запятую), например: `http://localhost:5173,https://your-pwa.onrender.com`
 
 ---
 

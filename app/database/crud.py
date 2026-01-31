@@ -49,6 +49,50 @@ async def get_first_user(db: AsyncSession) -> Optional[User]:
     return result.scalar_one_or_none()
 
 
+async def get_all_users(db: AsyncSession, limit: int = 500) -> List[User]:
+    """Получить всех пользователей (для админки)"""
+    result = await db.execute(
+        select(User).order_by(User.id.asc()).limit(limit)
+    )
+    return list(result.scalars().all())
+
+
+async def update_user(
+    db: AsyncSession,
+    user_id: int,
+    *,
+    is_active: Optional[bool] = None,
+    company_name: Optional[str] = None,
+    is_admin: Optional[bool] = None,
+) -> Optional[User]:
+    """Обновить пользователя (админка)"""
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        return None
+    if is_active is not None:
+        user.is_active = is_active
+    if company_name is not None:
+        user.company_name = company_name
+    if is_admin is not None:
+        user.is_admin = is_admin
+    user.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+async def set_user_password(db: AsyncSession, user_id: int, new_password: str) -> Optional[User]:
+    """Установить новый пароль пользователю (хеш)"""
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        return None
+    user.hashed_password = get_password_hash(new_password)
+    user.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
 # ========== BOT USER (Клиент бота) ==========
 
 async def get_bot_user_by_user_id(db: AsyncSession, user_id: str, owner_id: int) -> Optional[BotUser]:

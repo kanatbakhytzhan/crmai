@@ -82,3 +82,28 @@ async def get_current_user(
     
     print(f"[Auth OK] Polzovatel nayden: ID={user.id}, Company={user.company_name}")
     return user
+
+
+async def get_current_admin(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+) -> User:
+    """
+    Текущий пользователь должен быть админом: is_admin=True или email в ADMIN_EMAILS.
+    Иначе 403 Forbidden.
+    """
+    from app.core.config import get_settings
+    settings = get_settings()
+    is_admin = getattr(current_user, "is_admin", False)
+    if not is_admin and getattr(settings, "admin_emails", None):
+        emails_str = settings.admin_emails.strip()
+        if emails_str:
+            admin_list = [e.strip().lower() for e in emails_str.split(",") if e.strip()]
+            if current_user.email.lower() in admin_list:
+                is_admin = True
+    if not is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required"
+        )
+    return current_user

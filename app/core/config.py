@@ -50,8 +50,11 @@ class Settings(BaseSettings):
     dev_mode: str = "FALSE"  # TRUE - очистка БД при перезапуске
     
     # Guest mode: владелец лидов с веб-чата (без токена). Если задан email — все гостевые лиды идут этому пользователю.
-    # На Render задайте DEFAULT_OWNER_EMAIL=kana.bahytzhan@gmail.com (или ваш email).
     default_owner_email: Optional[str] = None
+    
+    # Админка: emails, которые считаются админами (без is_admin в БД). Формат: "email1,email2"
+    # На Render задайте ADMIN_EMAILS=kana.bahytzhan@gmail.com для первого суперадмина.
+    admin_emails: Optional[str] = None
     
     class Config:
         env_file = ".env"

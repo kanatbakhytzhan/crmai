@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.database.session import init_db, drop_all_tables, engine, sync_engine, Base
-from app.api.endpoints import chat, auth
+from app.api.endpoints import chat, auth, admin_users
 from app.services.telegram_service import stop_bot
 from app.admin import setup_admin
 
@@ -92,6 +92,7 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 # Подключение роутеров
 app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
 app.include_router(chat.router, prefix="/api", tags=["Chat"])
+app.include_router(admin_users.router, prefix="/api/admin", tags=["Admin Users"])
 
 # Подключение админ-панели (используем СИНХРОННЫЙ engine!)
 setup_admin(app, sync_engine)

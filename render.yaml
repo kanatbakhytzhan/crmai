@@ -25,3 +25,5 @@ services:
         sync: false
       - key: DEFAULT_OWNER_EMAIL
         sync: false
+      - key: ADMIN_EMAILS
+        sync: false

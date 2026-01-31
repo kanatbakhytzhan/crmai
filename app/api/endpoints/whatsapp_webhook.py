@@ -42,34 +42,57 @@ def _whatsapp_enabled() -> bool:
     return get_settings().whatsapp_enabled.upper() == "TRUE"
 
 
+def _qp(request: Request, *keys: str) -> str | None:
+    """Первое непустое значение из request.query_params по одному из ключей (Meta: hub.mode, Swagger: hub_mode)."""
+    for key in keys:
+        v = request.query_params.get(key)
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    return None
+
+
 @router.get("/webhook")
-async def webhook_verify(
-    request: Request,
-    hub_mode: str | None = None,
-    hub_verify_token: str | None = None,
-    hub_challenge: str | None = None,
-    db: AsyncSession = Depends(get_db),
-):
+async def webhook_verify(request: Request, db: AsyncSession = Depends(get_db)):
     """
-    Meta verification: hub.mode, hub.verify_token, hub.challenge.
-    verify_token сверяется с whatsapp_accounts.verify_token или WHATSAPP_VERIFY_TOKEN (fallback).
+    Meta verification: поддерживаются оба формата параметров — hub.mode / hub_mode,
+    hub.verify_token / hub_verify_token, hub.challenge / hub_challenge.
     """
     if not _whatsapp_enabled():
         return PlainTextResponse("disabled", status_code=404)
-    if hub_mode != "subscribe" or not hub_challenge:
-        return PlainTextResponse("bad request", status_code=400)
+
+    mode = _qp(request, "hub.mode", "hub_mode")
+    token = _qp(request, "hub.verify_token", "hub_verify_token")
+    challenge = _qp(request, "hub.challenge", "hub_challenge")
+
+    if mode != "subscribe":
+        return PlainTextResponse("bad request: mode must be subscribe", status_code=400)
+    if not token:
+        return PlainTextResponse("bad request: verify_token required", status_code=400)
+    if not challenge:
+        return PlainTextResponse("bad request: challenge required", status_code=400)
+
     settings = get_settings()
     expected = getattr(settings, "whatsapp_verify_token", None) or os.environ.get("WHATSAPP_VERIFY_TOKEN")
-    if expected and hub_verify_token == expected:
-        return PlainTextResponse(hub_challenge)
-    from sqlalchemy import select
-    from app.database.models import WhatsAppAccount
-    r = await db.execute(
-        select(WhatsAppAccount).where(WhatsAppAccount.verify_token == hub_verify_token).where(WhatsAppAccount.is_active == True)
-    )
-    acc = r.scalar_one_or_none()
-    if acc:
-        return PlainTextResponse(hub_challenge)
+    if expected and token == expected:
+        print(f"[WA] verify ok: mode={mode!r}, token_source=env, challenge_len={len(challenge)}")
+        return PlainTextResponse(challenge, status_code=200)
+
+    try:
+        from sqlalchemy import select
+        from app.database.models import WhatsAppAccount
+
+        r = await db.execute(
+            select(WhatsAppAccount)
+            .where(WhatsAppAccount.verify_token == token)
+            .where(WhatsAppAccount.is_active == True)
+        )
+        acc = r.scalar_one_or_none()
+        if acc:
+            print(f"[WA] verify ok: mode={mode!r}, token_source=db, challenge_len={len(challenge)}")
+            return PlainTextResponse(challenge, status_code=200)
+    except Exception as e:
+        print(f"[WA] verify db check failed: {type(e).__name__}: {e}")
+
     return PlainTextResponse("forbidden", status_code=403)
 
 

@@ -10,6 +10,7 @@ from app.database import crud
 from app.database.models import User
 from app.schemas.tenant import (
     TenantCreate,
+    TenantUpdate,
     TenantResponse,
     WhatsAppAccountCreate,
     WhatsAppAccountResponse,
@@ -24,14 +25,40 @@ async def create_tenant(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_admin),
 ):
-    """Создать tenant (name, slug)."""
+    """Создать tenant (name, slug, optional default_owner_user_id)."""
     existing = await crud.get_tenant_by_slug(db, body.slug)
     if existing:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Tenant with this slug already exists",
         )
-    tenant = await crud.create_tenant(db, name=body.name, slug=body.slug)
+    tenant = await crud.create_tenant(
+        db,
+        name=body.name,
+        slug=body.slug,
+        default_owner_user_id=body.default_owner_user_id,
+    )
+    return TenantResponse.model_validate(tenant)
+
+
+@router.patch("/tenants/{tenant_id}", response_model=TenantResponse)
+async def update_tenant(
+    tenant_id: int,
+    body: TenantUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin),
+):
+    """Обновить tenant: name, slug, is_active, default_owner_user_id."""
+    tenant = await crud.update_tenant(
+        db,
+        tenant_id,
+        name=body.name,
+        slug=body.slug,
+        is_active=body.is_active,
+        default_owner_user_id=body.default_owner_user_id,
+    )
+    if not tenant:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
     return TenantResponse.model_validate(tenant)
 
 

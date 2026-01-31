@@ -197,31 +197,70 @@ async def create_lead(
     return lead
 
 
-async def get_user_leads(db: AsyncSession, owner_id: int, limit: int = 100) -> List[Lead]:
-    """Получить все заявки пользователя"""
+async def get_user_leads(
+    db: AsyncSession,
+    owner_id: int,
+    limit: int = 100,
+    *,
+    multitenant_include_tenant_leads: bool = False,
+) -> List[Lead]:
+    """
+    Получить заявки пользователя. Если multitenant_include_tenant_leads=True,
+    также включаются лиды с tenant_id, у которых tenant.default_owner_user_id = owner_id.
+    """
+    if not multitenant_include_tenant_leads:
+        result = await db.execute(
+            select(Lead)
+            .where(Lead.owner_id == owner_id)
+            .order_by(Lead.created_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+    from sqlalchemy import or_
+    subq = select(Tenant.id).where(Tenant.default_owner_user_id == owner_id)
     result = await db.execute(
         select(Lead)
-        .where(Lead.owner_id == owner_id)
+        .where(or_(Lead.owner_id == owner_id, Lead.tenant_id.in_(subq)))
         .order_by(Lead.created_at.desc())
         .limit(limit)
     )
     return list(result.scalars().all())
 
 
-async def get_lead_by_id(db: AsyncSession, lead_id: int, owner_id: int) -> Optional[Lead]:
-    """Получить лид по ID (с проверкой владельца)"""
-    result = await db.execute(
-        select(Lead).where(
-            Lead.id == lead_id,
-            Lead.owner_id == owner_id
-        )
-    )
-    return result.scalar_one_or_none()
+async def get_lead_by_id(
+    db: AsyncSession,
+    lead_id: int,
+    owner_id: int,
+    *,
+    multitenant_include_tenant_leads: bool = False,
+) -> Optional[Lead]:
+    """
+    Получить лид по ID. Доступ если owner_id совпадает или (multitenant и
+    lead.tenant_id и tenant.default_owner_user_id == owner_id).
+    """
+    result = await db.execute(select(Lead).where(Lead.id == lead_id))
+    lead = result.scalar_one_or_none()
+    if not lead:
+        return None
+    if lead.owner_id == owner_id:
+        return lead
+    if multitenant_include_tenant_leads and lead.tenant_id is not None:
+        tenant = await get_tenant_by_id(db, lead.tenant_id)
+        if tenant and getattr(tenant, "default_owner_user_id", None) == owner_id:
+            return lead
+    return None
 
 
-async def update_lead_status(db: AsyncSession, lead_id: int, owner_id: int, status: LeadStatus) -> Optional[Lead]:
+async def update_lead_status(
+    db: AsyncSession,
+    lead_id: int,
+    owner_id: int,
+    status: LeadStatus,
+    *,
+    multitenant_include_tenant_leads: bool = False,
+) -> Optional[Lead]:
     """Обновить статус лида"""
-    lead = await get_lead_by_id(db, lead_id, owner_id)
+    lead = await get_lead_by_id(db, lead_id, owner_id, multitenant_include_tenant_leads=multitenant_include_tenant_leads)
     if lead:
         lead.status = status
         await db.commit()
@@ -257,7 +296,13 @@ async def has_recent_lead(db: AsyncSession, bot_user_id: int, minutes: int = 5) 
     return lead is not None
 
 
-async def delete_lead(db: AsyncSession, lead_id: int, owner_id: int) -> bool:
+async def delete_lead(
+    db: AsyncSession,
+    lead_id: int,
+    owner_id: int,
+    *,
+    multitenant_include_tenant_leads: bool = False,
+) -> bool:
     """
     Удалить заявку по ID (с проверкой владельца)
     
@@ -269,7 +314,7 @@ async def delete_lead(db: AsyncSession, lead_id: int, owner_id: int) -> bool:
     Returns:
         True если заявка была удалена, False если не найдена
     """
-    lead = await get_lead_by_id(db, lead_id, owner_id)
+    lead = await get_lead_by_id(db, lead_id, owner_id, multitenant_include_tenant_leads=multitenant_include_tenant_leads)
     if lead:
         await db.delete(lead)
         await db.commit()
@@ -279,10 +324,45 @@ async def delete_lead(db: AsyncSession, lead_id: int, owner_id: int) -> bool:
 
 # ========== TENANT (multi-tenant) ==========
 
-async def create_tenant(db: AsyncSession, name: str, slug: str) -> Tenant:
+async def create_tenant(
+    db: AsyncSession,
+    name: str,
+    slug: str,
+    default_owner_user_id: Optional[int] = None,
+) -> Tenant:
     """Создать tenant."""
-    tenant = Tenant(name=name, slug=slug.strip().lower())
+    tenant = Tenant(
+        name=name,
+        slug=slug.strip().lower(),
+        default_owner_user_id=default_owner_user_id,
+    )
     db.add(tenant)
+    await db.commit()
+    await db.refresh(tenant)
+    return tenant
+
+
+async def update_tenant(
+    db: AsyncSession,
+    tenant_id: int,
+    *,
+    name: Optional[str] = None,
+    slug: Optional[str] = None,
+    is_active: Optional[bool] = None,
+    default_owner_user_id: Optional[int] = None,
+) -> Optional[Tenant]:
+    """Обновить tenant."""
+    tenant = await get_tenant_by_id(db, tenant_id)
+    if not tenant:
+        return None
+    if name is not None:
+        tenant.name = name
+    if slug is not None:
+        tenant.slug = slug.strip().lower()
+    if is_active is not None:
+        tenant.is_active = is_active
+    if default_owner_user_id is not None:
+        tenant.default_owner_user_id = default_owner_user_id
     await db.commit()
     await db.refresh(tenant)
     return tenant
@@ -362,15 +442,23 @@ async def create_lead_from_whatsapp(
     from_wa_id: Optional[str] = None,
 ) -> Optional[Lead]:
     """
-    Создать лид из webhook WhatsApp. Использует первого пользователя как owner и создаёт BotUser wa_{wa_id}.
+    Создать лид из webhook WhatsApp. owner_id = tenant.default_owner_user_id;
+    если NULL — fallback на первого пользователя с предупреждением в лог.
     """
     tenant = await get_tenant_by_id(db, tenant_id)
     if not tenant:
         return None
-    first_user = await get_first_user(db)
-    if not first_user:
-        return None
-    owner_id = first_user.id
+    owner_id = getattr(tenant, "default_owner_user_id", None)
+    if owner_id is not None:
+        user = await get_user_by_id(db, owner_id)
+        if not user:
+            owner_id = None
+    if owner_id is None:
+        print("[WA][WARNING] tenant has no default_owner_user_id, fallback to first user")
+        first_user = await get_first_user(db)
+        if not first_user:
+            return None
+        owner_id = first_user.id
     wa_user_id = f"wa_{from_wa_id}" if from_wa_id else "wa_unknown"
     bot_user = await get_or_create_bot_user(db, user_id=wa_user_id, owner_id=owner_id)
     lead = Lead(

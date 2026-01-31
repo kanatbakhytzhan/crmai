@@ -8,21 +8,31 @@
 
 ## Таблицы
 
-- `tenants` — клиенты (id, name, slug, is_active, created_at).
+- `tenants` — клиенты (id, name, slug, is_active, default_owner_user_id, created_at). **Установите `default_owner_user_id`** (ID пользователя из `users`), чтобы лиды из WhatsApp попадали в CRM этому пользователю.
 - `whatsapp_accounts` — привязка номера к tenant (tenant_id, phone_number, phone_number_id, verify_token, waba_id, …).
-- `leads` — добавлено поле `tenant_id` (nullable).
+- `leads` — добавлено поле `tenant_id` (nullable). При создании из webhook `owner_id` берётся из `tenant.default_owner_user_id`; если NULL — fallback на первого пользователя (в лог пишется предупреждение).
 
 ## Админ-эндпоинты (JWT + admin)
 
-- `POST /api/admin/tenants` — создать tenant: `{"name": "...", "slug": "..."}`.
-- `GET /api/admin/tenants` — список tenants.
+- `POST /api/admin/tenants` — создать tenant: `{"name": "...", "slug": "...", "default_owner_user_id": 1}` (опционально).
+- `GET /api/admin/tenants` — список tenants (включая `default_owner_user_id`).
+- `PATCH /api/admin/tenants/{tenant_id}` — обновить tenant: `{"name": "...", "slug": "...", "is_active": true, "default_owner_user_id": 1}`.
 - `POST /api/admin/tenants/{tenant_id}/whatsapp` — привязать номер: `{"phone_number": "...", "phone_number_id": "...", "verify_token": "..."}`.
 - `GET /api/admin/tenants/{tenant_id}/whatsapp` — список номеров tenant.
+
+**Пример: установить владельца tenant (чтобы лиды показывались в CRM)**
+
+```bash
+curl -i -X PATCH "http://localhost:8000/api/admin/tenants/1" \
+  -H "Authorization: Bearer YOUR_JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"default_owner_user_id": 1}'
+```
 
 ## Webhook Meta
 
 - `GET /api/whatsapp/webhook` — верификация: `hub.mode`, `hub.verify_token`, `hub.challenge`. Токен сверяется с `WHATSAPP_VERIFY_TOKEN` или с `whatsapp_accounts.verify_token`.
-- `POST /api/whatsapp/webhook` — приём сообщений. По `phone_number_id` из payload находится tenant, создаётся lead с `tenant_id` и текстом сообщения.
+- `POST /api/whatsapp/webhook` — приём сообщений. По `phone_number_id` из payload находится tenant, создаётся lead с `owner_id = tenant.default_owner_user_id` (или первый пользователь с предупреждением в лог) и текстом сообщения.
 
 ## Проверка локально (curl)
 

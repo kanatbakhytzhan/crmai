@@ -75,6 +75,14 @@ async def init_db():
                 print("[OK] Kolonka leads.tenant_id proverena/dobavlena")
             except Exception as e:
                 print(f"[WARN] leads.tenant_id migration: {type(e).__name__}: {e}")
+            # default_owner_user_id в tenants (nullable)
+            try:
+                await conn.execute(text(
+                    "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS default_owner_user_id INTEGER REFERENCES users(id)"
+                ))
+                print("[OK] Kolonka tenants.default_owner_user_id proverena/dobavlena")
+            except Exception as e:
+                print(f"[WARN] tenants.default_owner_user_id migration: {type(e).__name__}: {e}")
 
     print("[OK] Baza dannyh initializirovana")
 

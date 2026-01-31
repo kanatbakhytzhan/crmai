@@ -7,6 +7,14 @@ from typing import Optional
 class TenantCreate(BaseModel):
     name: str
     slug: str
+    default_owner_user_id: Optional[int] = None
+
+
+class TenantUpdate(BaseModel):
+    name: Optional[str] = None
+    slug: Optional[str] = None
+    is_active: Optional[bool] = None
+    default_owner_user_id: Optional[int] = None
 
 
 class TenantResponse(BaseModel):
@@ -14,6 +22,7 @@ class TenantResponse(BaseModel):
     name: str
     slug: str
     is_active: bool
+    default_owner_user_id: Optional[int] = None
     created_at: datetime
 
     class Config:

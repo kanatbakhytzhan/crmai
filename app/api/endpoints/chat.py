@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
 from app.api.deps import get_db, get_current_user
+from app.core.config import get_settings
 from app.database import crud
 from app.database.models import User
 from app.schemas.lead import LeadResponse
@@ -237,12 +238,17 @@ async def get_leads(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Получить все заявки текущего пользователя
-    
-    Требует JWT токен. Возвращает ТОЛЬКО заявки владельца токена.
-    Multi-tenancy: Пользователь А не видит заявки Пользователя Б.
+    Получить все заявки текущего пользователя.
+    Требует JWT токен. При MULTITENANT_ENABLED=true также показываются лиды
+    tenants, у которых default_owner_user_id = current_user.id.
     """
-    leads = await crud.get_user_leads(db, owner_id=current_user.id)
+    settings = get_settings()
+    multitenant = (getattr(settings, "multitenant_enabled", "false") or "false").upper() == "TRUE"
+    leads = await crud.get_user_leads(
+        db,
+        owner_id=current_user.id,
+        multitenant_include_tenant_leads=multitenant,
+    )
     # Диагностика: по какому владельцу фильтруем и сколько лидов найдено
     print(f"[GET /api/leads] current_user.id={current_user.id}, email={current_user.email}, leads_count={len(leads)}")
     # Сериализация через LeadResponse: status гарантированно строка ("new", "in_progress" и т.д.) для CRM
@@ -257,11 +263,14 @@ async def get_lead(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Получить одну заявку по ID
-    
-    Требует JWT токен. Возвращает заявку только если она принадлежит владельцу токена.
+    Получить одну заявку по ID.
+    Требует JWT токен. При MULTITENANT_ENABLED=true доступны также лиды tenant, где default_owner = user.
     """
-    lead = await crud.get_lead_by_id(db, lead_id=lead_id, owner_id=current_user.id)
+    multitenant = (getattr(get_settings(), "multitenant_enabled", "false") or "false").upper() == "TRUE"
+    lead = await crud.get_lead_by_id(
+        db, lead_id=lead_id, owner_id=current_user.id,
+        multitenant_include_tenant_leads=multitenant,
+    )
     
     if not lead:
         raise HTTPException(
@@ -319,11 +328,13 @@ async def update_lead_status(
     new_status = status_mapping[new_status_str]
     
     # Обновляем статус
+    multitenant = (getattr(get_settings(), "multitenant_enabled", "false") or "false").upper() == "TRUE"
     lead = await crud.update_lead_status(
-        db, 
-        lead_id=lead_id, 
-        owner_id=current_user.id, 
-        status=new_status
+        db,
+        lead_id=lead_id,
+        owner_id=current_user.id,
+        status=new_status,
+        multitenant_include_tenant_leads=multitenant,
     )
     
     if not lead:
@@ -353,7 +364,11 @@ async def delete_lead(
     Требует JWT токен. Удаляет заявку только если она принадлежит владельцу токена.
     Используется для удаления тестовых/мусорных заявок.
     """
-    deleted = await crud.delete_lead(db, lead_id=lead_id, owner_id=current_user.id)
+    multitenant = (getattr(get_settings(), "multitenant_enabled", "false") or "false").upper() == "TRUE"
+    deleted = await crud.delete_lead(
+        db, lead_id=lead_id, owner_id=current_user.id,
+        multitenant_include_tenant_leads=multitenant,
+    )
     
     if not deleted:
         raise HTTPException(

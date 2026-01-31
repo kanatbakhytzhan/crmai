@@ -5,6 +5,10 @@
 - `MULTITENANT_ENABLED` — `false` (по умолчанию). При `false` лиды по `/api/leads` работают как раньше (без фильтра по tenant).
 - `WHATSAPP_ENABLED` — `false` (по умолчанию). При `true` включаются эндпоинты `/api/whatsapp/webhook`.
 - `WHATSAPP_VERIFY_TOKEN` — (опционально) токен для верификации Meta. Если не задан, проверяется `verify_token` в таблице `whatsapp_accounts`.
+- `WHATSAPP_SEND_ENABLED` — `false` (по умолчанию). При `true` ответы ассистента отправляются в WhatsApp через Cloud API (нужен `WHATSAPP_ACCESS_TOKEN`).
+- `WHATSAPP_ACCESS_TOKEN` — (опционально) токен доступа Meta для отправки сообщений. Используется только при `WHATSAPP_SEND_ENABLED=true`.
+- `WHATSAPP_API_VERSION` — версия API (по умолчанию `v20.0`).
+- `WHATSAPP_GRAPH_BASE` — базовый URL (по умолчанию `https://graph.facebook.com`).
 
 ## Таблицы
 
@@ -87,4 +91,18 @@ def test_webhook_verify_disabled(client):
 - **Таблицы:** `conversations`, `conversation_messages`. Контекст для AI — последние 20 сообщений (build_context_messages).
 - **Порядок:** append_user_message → build_context_messages → OpenAI → append_assistant_message.
 - **Логи:** `[WA][CHAT] conv_id=... tenant_id=... from=... stored user msg`, `[WA][CHAT] loaded N context messages`, `[WA][CHAT] stored assistant msg`.
-- Отправка ответа обратно в WhatsApp не реализована — ответ только в БД и лог. Webhook всегда возвращает `{"ok": true}`; при ошибке AI лид создаётся, в лог пишется предупреждение.
+- Отправка ответа в WhatsApp опциональна (см. раздел «Optional sending replies» ниже). По умолчанию ответ только сохраняется в БД и лог. Webhook всегда возвращает `{"ok": true}`; при ошибке AI или отправки лид создаётся, в лог пишется предупреждение.
+
+## Optional sending replies
+
+По умолчанию **отправка ответов в WhatsApp выключена**: ответ ассистента сохраняется в БД и в логах, но не отправляется в чат. Так прод остаётся стабильным без настройки Cloud API.
+
+**Как включить позже (например на Render):**
+
+1. В Environment добавьте:
+   - `WHATSAPP_SEND_ENABLED` = `true`
+   - `WHATSAPP_ACCESS_TOKEN` = ваш токен доступа приложения Meta (с правами на отправку сообщений WhatsApp)
+
+2. Сохраните и перезапустите сервис.
+
+3. **Проверка:** отправьте сообщение в WhatsApp на привязанный номер; в логах должно появиться `[WA][SEND] ok message_id=...`. Если токен не задан или отправка выключена — будет `[WA][SEND] skipped disabled` или `[WA][SEND] skipped missing_token`. При ошибке API — `[WA][SEND] failed error=...`. Webhook в любом случае возвращает `{"ok": true}`.

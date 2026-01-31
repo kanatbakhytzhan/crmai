@@ -11,7 +11,7 @@ from fastapi.responses import PlainTextResponse
 from app.api.deps import get_db
 from app.core.config import get_settings
 from app.database import crud
-from app.services import openai_service, conversation_service
+from app.services import openai_service, conversation_service, whatsapp_cloud_api
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
@@ -137,4 +137,13 @@ async def webhook_post(
                 if assistant_reply:
                     await conversation_service.append_assistant_message(db, conv.id, assistant_reply)
                     log.info("[WA][CHAT] stored assistant msg")
+                    send_result = await whatsapp_cloud_api.send_text_message(
+                        phone_number_id_str, from_wa_id, assistant_reply
+                    )
+                    if send_result.get("skipped"):
+                        log.info("[WA][SEND] skipped %s", send_result.get("reason", "unknown"))
+                    elif send_result.get("ok"):
+                        log.info("[WA][SEND] ok message_id=%s", send_result.get("message_id") or "—")
+                    else:
+                        log.warning("[WA][SEND] failed error=%s", send_result.get("error", "unknown"))
     return {"ok": True}

@@ -63,7 +63,13 @@ class Settings(BaseSettings):
     multitenant_enabled: str = "false"  # "true" — фильтр лидов по tenant
     whatsapp_enabled: str = "false"     # "true" — включить webhook WhatsApp
     whatsapp_verify_token: Optional[str] = None  # Fallback для Meta verification
-    
+
+    # WhatsApp Cloud API: отправка ответов (по умолчанию выключено)
+    whatsapp_send_enabled: str = "false"  # "true" — отправлять ответы в WhatsApp
+    whatsapp_access_token: Optional[str] = None
+    whatsapp_api_version: str = "v20.0"
+    whatsapp_graph_base: str = "https://graph.facebook.com"
+
     class Config:
         env_file = ".env"
         case_sensitive = False

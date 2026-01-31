@@ -30,3 +30,6 @@ sqladmin[full]>=0.16.0
 
 # Email валидация (для Pydantic)
 email-validator>=2.0.0
+
+# HTTP client (WhatsApp Cloud API)
+httpx>=0.27.0

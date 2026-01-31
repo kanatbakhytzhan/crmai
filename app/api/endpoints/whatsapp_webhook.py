@@ -59,11 +59,10 @@ def _mask_token(token: str) -> str:
 
 
 @router.get("/webhook")
-async def webhook_verify(request: Request, db: AsyncSession = Depends(get_db)):
+async def webhook_verify(request: Request):
     """
-    Meta verification: принимаются оба формата — hub.mode / hub_mode,
-    hub.verify_token / hub_verify_token, hub.challenge / hub_challenge.
-    Основной способ: сравнение с WHATSAPP_VERIFY_TOKEN (env). Если пустой — fallback на БД (LIMIT 1).
+    Meta verification: hub.mode / hub_mode, hub.verify_token / hub_verify_token, hub.challenge / hub_challenge.
+    Токен проверяется только по env WHATSAPP_VERIFY_TOKEN. БД не используется.
     """
     if not _whatsapp_enabled():
         return PlainTextResponse("disabled", status_code=404)
@@ -80,30 +79,9 @@ async def webhook_verify(request: Request, db: AsyncSession = Depends(get_db)):
     env_token = (getattr(get_settings(), "whatsapp_verify_token", None) or os.environ.get("WHATSAPP_VERIFY_TOKEN"))
     env_token = (env_token or "").strip()
 
-    if env_token:
-        if token == env_token:
-            print(f"[WA] verify ok token_mask={_mask_token(token)}")
-            return PlainTextResponse(challenge, status_code=200)
-        print(f"[WA] verify forbidden token_mask={_mask_token(token)}")
-        return PlainTextResponse("forbidden", status_code=403)
-
-    try:
-        from sqlalchemy import select
-        from app.database.models import WhatsAppAccount
-
-        r = await db.execute(
-            select(WhatsAppAccount)
-            .where(WhatsAppAccount.verify_token == token)
-            .where(WhatsAppAccount.is_active == True)
-            .limit(1)
-        )
-        acc = r.scalars().first()
-        if acc:
-            print(f"[WA] verify ok token_mask={_mask_token(token)}")
-            return PlainTextResponse(challenge, status_code=200)
-    except Exception as e:
-        print(f"[WA] verify db_error {type(e).__name__}: {e}")
-
+    if env_token and token == env_token:
+        print(f"[WA] verify ok token_mask={_mask_token(token)}")
+        return PlainTextResponse(challenge, status_code=200)
     print(f"[WA] verify forbidden token_mask={_mask_token(token)}")
     return PlainTextResponse("forbidden", status_code=403)
 

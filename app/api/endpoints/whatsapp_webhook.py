@@ -2,6 +2,7 @@
 WhatsApp webhook: verification (GET) и приём сообщений (POST).
 MULTITENANT_ENABLED / WHATSAPP_ENABLED управляют включением.
 """
+import logging
 import os
 from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import PlainTextResponse
@@ -12,6 +13,7 @@ from app.database import crud
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
+log = logging.getLogger(__name__)
 
 # Пример тела для Swagger /docs (Meta WhatsApp webhook payload)
 WHATSAPP_WEBHOOK_BODY_EXAMPLE = {
@@ -43,7 +45,7 @@ def _whatsapp_enabled() -> bool:
 
 
 def _qp(request: Request, *keys: str) -> str | None:
-    """Первое непустое значение из request.query_params по одному из ключей (Meta: hub.mode, Swagger: hub_mode)."""
+    """Первое непустое значение из request.query_params (hub.mode / hub_mode и т.д.)."""
     for key in keys:
         v = request.query_params.get(key)
         if v is not None and str(v).strip():
@@ -51,18 +53,12 @@ def _qp(request: Request, *keys: str) -> str | None:
     return None
 
 
-def _mask_token(token: str) -> str:
-    """Маска токена для логов: первые 3 + *** + последние 2 (без полного секрета)."""
-    if not token or len(token) <= 5:
-        return "***" if token else "(empty)"
-    return token[:3] + "***" + token[-2:]
-
-
 @router.get("/webhook")
 async def webhook_verify(request: Request):
     """
-    Meta verification: hub.mode / hub_mode, hub.verify_token / hub_verify_token, hub.challenge / hub_challenge.
-    Токен проверяется только по env WHATSAPP_VERIFY_TOKEN. БД не используется.
+    Meta verification: читает hub_mode, hub_verify_token, hub_challenge из query
+    (поддержка hub.mode/hub_mode, hub.verify_token/hub_verify_token, hub.challenge/hub_challenge).
+    Только env WHATSAPP_VERIFY_TOKEN, БД не используется.
     """
     if not _whatsapp_enabled():
         return PlainTextResponse("disabled", status_code=404)
@@ -70,19 +66,13 @@ async def webhook_verify(request: Request):
     mode = _qp(request, "hub.mode", "hub_mode")
     token = _qp(request, "hub.verify_token", "hub_verify_token")
     challenge = _qp(request, "hub.challenge", "hub_challenge")
+    env_token = (getattr(get_settings(), "whatsapp_verify_token", None) or os.environ.get("WHATSAPP_VERIFY_TOKEN")) or ""
+    env_token = env_token.strip()
 
-    if mode != "subscribe":
-        return PlainTextResponse("bad request", status_code=400)
-    if not token or not challenge:
-        return PlainTextResponse("bad request", status_code=400)
-
-    env_token = (getattr(get_settings(), "whatsapp_verify_token", None) or os.environ.get("WHATSAPP_VERIFY_TOKEN"))
-    env_token = (env_token or "").strip()
-
-    if env_token and token == env_token:
-        print(f"[WA] verify ok token_mask={_mask_token(token)}")
+    if mode == "subscribe" and token and challenge and env_token and token == env_token:
+        log.info("WA verify ok")
         return PlainTextResponse(challenge, status_code=200)
-    print(f"[WA] verify forbidden token_mask={_mask_token(token)}")
+    log.info("WA verify forbidden")
     return PlainTextResponse("forbidden", status_code=403)
 
 

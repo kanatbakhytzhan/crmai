@@ -58,6 +58,13 @@ async def lifespan(app: FastAPI):
     # Telegram бот готов для отправки уведомлений
     print("[*] Telegram bot gotov dlya otpravki uvedomleniy")
     
+    # Proof: list API routes (POST /api/auth/login must appear)
+    for route in app.routes:
+        if hasattr(route, "path") and hasattr(route, "methods") and route.path and route.path.startswith("/api/"):
+            for method in sorted(route.methods or set()):
+                if method != "HEAD":
+                    print(f"[ROUTES] {method} {route.path}")
+    
     print("[OK] Prilozhenie zapushcheno!")
     print(f"[OK] Kompaniya: {settings.app_name}")
     print(f"[OK] JWT Auth: ENABLED")
@@ -86,10 +93,11 @@ _settings = get_settings()
 _origins_list = _parse_cors_origins(_settings.cors_origins)
 if not _origins_list:
     _origins_list = ["https://buildcrm-pwa.vercel.app"]
-print(f"[CORS] Final parsed allowed origins: {_origins_list}")
+_CORS_ORIGIN_REGEX = r"^https://.*\.vercel\.app$"
+print(f"[CORS] Allowed origins: {_origins_list}")
+print(f"[CORS] allow_origin_regex: {_CORS_ORIGIN_REGEX}")
 
-# Middleware order: last added = runs first. We want CORS first, then Session.
-# So add Session first, then CORSMiddleware (CORS runs first on request).
+# Middleware: add BEFORE routers (we add before include_router). Last added = runs first.
 app.add_middleware(
     SessionMiddleware,
     secret_key=_settings.secret_key,
@@ -97,6 +105,7 @@ app.add_middleware(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_origins_list,
+    allow_origin_regex=_CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -153,13 +162,19 @@ async def api_health():
 
 @app.get("/api/debug/cors", include_in_schema=False)
 async def debug_cors(request: Request):
-    """Debug: request Origin vs allowed origins. Remove or protect after fix."""
+    """TEMP: CORS diagnostics. Remove or protect after fix."""
+    import re
     origin = request.headers.get("origin") or "(none)"
-    allowed = list(_origins_list)
-    origin_allowed = origin in allowed if origin != "(none)" else False
+    allowed_origins = list(_origins_list)
+    in_list = origin in allowed_origins if origin != "(none)" else False
+    regex_ok = bool(re.match(_CORS_ORIGIN_REGEX, origin)) if origin != "(none)" else False
+    origin_allowed = in_list or regex_ok
     return {
+        "origin": origin,
+        "allowedOrigins": allowed_origins,
+        "originAllowed": origin_allowed,
         "request_origin": origin,
-        "allowed_origins": allowed,
+        "allowed_origins": allowed_origins,
         "origin_allowed": origin_allowed,
     }
 

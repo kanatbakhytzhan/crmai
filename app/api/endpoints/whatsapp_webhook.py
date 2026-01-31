@@ -3,7 +3,7 @@ WhatsApp webhook: verification (GET) и приём сообщений (POST).
 MULTITENANT_ENABLED / WHATSAPP_ENABLED управляют включением.
 """
 import os
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import PlainTextResponse
 
 from app.api.deps import get_db
@@ -12,6 +12,30 @@ from app.database import crud
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
+
+# Пример тела для Swagger /docs (Meta WhatsApp webhook payload)
+WHATSAPP_WEBHOOK_BODY_EXAMPLE = {
+    "object": "whatsapp_business_account",
+    "entry": [
+        {
+            "id": "1",
+            "changes": [
+                {
+                    "value": {
+                        "metadata": {"phone_number_id": "111111111111111"},
+                        "messages": [
+                            {
+                                "from": "77001234567",
+                                "type": "text",
+                                "text": {"body": "Тест лид из WhatsApp"},
+                            }
+                        ],
+                    }
+                }
+            ],
+        }
+    ],
+}
 
 
 def _whatsapp_enabled() -> bool:
@@ -50,17 +74,17 @@ async def webhook_verify(
 
 
 @router.post("/webhook")
-async def webhook_post(request: Request, db: AsyncSession = Depends(get_db)):
+async def webhook_post(
+    payload: dict = Body(..., example=WHATSAPP_WEBHOOK_BODY_EXAMPLE),
+    db: AsyncSession = Depends(get_db),
+):
     """
     Принять payload Meta. Достать phone_number_id из entry[0].changes[0].value.metadata.phone_number_id.
     Найти tenant по phone_number_id, создать lead с tenant_id и текстом сообщения.
     """
     if not _whatsapp_enabled():
         return {"ok": True}
-    try:
-        body = await request.json()
-    except Exception:
-        return {"ok": True}
+    body = payload
     entries = body.get("entry") or []
     for entry in entries:
         changes = entry.get("changes") or []

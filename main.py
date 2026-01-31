@@ -1,6 +1,7 @@
 """
 Главный файл приложения FastAPI + Telegram Bot (SaaS версия)
 """
+import os
 import asyncio
 import threading
 from contextlib import asynccontextmanager
@@ -82,30 +83,33 @@ async def lifespan(app: FastAPI):
     print("[*] Prilozhenie ostanovleno")
 
 
-# Создание приложения FastAPI
+# Создание приложения FastAPI (redirect_slashes=False so POST /api/auth/login is not redirected to GET)
 app = FastAPI(
     title="AI Sales Manager SaaS API",
     description="Многопользовательская платформа ИИ-менеджеров по продажам",
     version="2.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    redirect_slashes=False,
 )
 
 # Config and CORS — applied BEFORE routers so CORS runs on every request
 from app.core.config import get_settings
 _settings = get_settings()
 
-# CORS_ORIGINS: split by comma, trim spaces, ignore empty
+# CORS: exact origins + regex for Vercel preview. Applied to SAME app that includes routers; middleware BEFORE include_router.
 _origins_list = _parse_cors_origins(_settings.cors_origins)
 if not _origins_list:
     _origins_list = [
-        "https://buildcrm-pwa.vercel.app",
         "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "https://buildcrm-pwa.vercel.app",
     ]
 _CORS_ORIGIN_REGEX = r"^https://.*\.vercel\.app$"
-print(f"[CORS] Allowed origins: {_origins_list}")
+_CORS_ALLOW_METHODS = ["GET", "POST", "PATCH", "DELETE", "OPTIONS"]
+_CORS_ALLOW_HEADERS = ["Authorization", "Content-Type"]
+print(f"[CORS] Allowed origins (final allowlist): {_origins_list}")
 print(f"[CORS] allow_origin_regex: {_CORS_ORIGIN_REGEX}")
 
-# Middleware: add BEFORE routers (we add before include_router). Last added = runs first.
 app.add_middleware(
     SessionMiddleware,
     secret_key=_settings.secret_key,
@@ -115,8 +119,8 @@ app.add_middleware(
     allow_origins=_origins_list,
     allow_origin_regex=_CORS_ORIGIN_REGEX,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=_CORS_ALLOW_METHODS,
+    allow_headers=_CORS_ALLOW_HEADERS,
     expose_headers=["*"],
 )
 
@@ -196,6 +200,27 @@ async def debug_cors(request: Request):
         "allowed_origins": allowed_origins,
         "origin_allowed": origin_allowed,
     }
+
+
+def _collect_api_routes():
+    """Routes starting with /api/auth or /api/leads (for diagnostics)."""
+    out = []
+    for route in app.routes:
+        if not hasattr(route, "path") or not route.path:
+            continue
+        if not (route.path.startswith("/api/auth") or route.path.startswith("/api/leads")):
+            continue
+        methods = sorted(route.methods or set()) if hasattr(route, "methods") else []
+        out.append({"path": route.path, "methods": methods})
+    return out
+
+
+@app.get("/api/debug/routes", include_in_schema=False)
+async def debug_routes():
+    """TEMP: List /api/auth and /api/leads routes. Only when DEBUG_ROUTES=true."""
+    if os.environ.get("DEBUG_ROUTES", "").upper() != "TRUE":
+        return {"enabled": False, "message": "Set DEBUG_ROUTES=true to enable"}
+    return {"enabled": True, "routes": _collect_api_routes()}
 
 
 if __name__ == "__main__":

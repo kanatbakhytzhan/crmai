@@ -5,8 +5,10 @@ import asyncio
 import threading
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -20,6 +22,9 @@ from app.admin import setup_admin
 # ВАЖНО: Импортируем модели, чтобы SQLAlchemy их зарегистрировал в Base.metadata
 # Без этого импорта таблицы не будут созданы!
 from app.database.models import User, BotUser, Message, Lead
+from app.api.deps import get_db
+from app.api.endpoints import auth as auth_endpoints
+from app.schemas.auth import Token
 
 
 def _parse_cors_origins(raw: str | None) -> list[str]:
@@ -92,7 +97,10 @@ _settings = get_settings()
 # CORS_ORIGINS: split by comma, trim spaces, ignore empty
 _origins_list = _parse_cors_origins(_settings.cors_origins)
 if not _origins_list:
-    _origins_list = ["https://buildcrm-pwa.vercel.app"]
+    _origins_list = [
+        "https://buildcrm-pwa.vercel.app",
+        "http://localhost:5173",
+    ]
 _CORS_ORIGIN_REGEX = r"^https://.*\.vercel\.app$"
 print(f"[CORS] Allowed origins: {_origins_list}")
 print(f"[CORS] allow_origin_regex: {_CORS_ORIGIN_REGEX}")
@@ -123,6 +131,17 @@ class _LogOriginMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(_LogOriginMiddleware)
+
+
+# Explicit alias for frontend: POST /api/auth/login (form-urlencoded username, password) -> { access_token, token_type }
+# Registered BEFORE auth router so this path is guaranteed; reuses same logic (no duplication).
+@app.post("/api/auth/login", response_model=Token)
+async def login_alias(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: AsyncSession = Depends(get_db),
+):
+    return await auth_endpoints.login(form_data, db)
+
 
 # Подключение статических файлов
 app.mount("/static", StaticFiles(directory="app/static"), name="static")

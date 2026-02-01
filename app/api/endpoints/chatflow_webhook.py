@@ -85,7 +85,7 @@ async def chatflow_ping():
 
 @router.post("/webhook")
 async def chatflow_webhook_post(request: Request):
-    """ChatFlow webhook POST — принять JSON, извлечь jid/text, сформировать ответ, отправить через send-text."""
+    """ChatFlow webhook POST: принять сообщение → сгенерировать ответ (OpenAI) → отправить через ChatFlow send-text."""
     body = await request.body()
     print("[CHATFLOW] RAW:", body[:2000])
 
@@ -97,29 +97,40 @@ async def chatflow_webhook_post(request: Request):
 
     print("[CHATFLOW] INCOMING JSON:", data)
 
-    if data is None:
+    if data is None or not isinstance(data, dict):
         return {"ok": True}
 
-    jid, text = extract_incoming(data)
-    if not text:
+    # Парсинг по формату ChatFlow: message = текст, metadata.remoteJid = jid
+    text = data.get("message")
+    if isinstance(text, dict):
+        text = text.get("text") or text.get("body") or str(text)
+    text = (text or "").strip() if text is not None else ""
+
+    jid = (data.get("metadata") or {}).get("remoteJid") if isinstance(data.get("metadata"), dict) else None
+    jid = (jid or "").strip() if jid else ""
+
+    if not jid or not text:
+        jid, text = extract_incoming(data)
+    if not jid or not text:
         return {"ok": True}
 
-    if not jid:
-        log.warning("[CHATFLOW] INCOMING: jid not found in payload")
-        return {"ok": True}
+    print("[CHATFLOW] jid:", jid)
+    print("[CHATFLOW] user text:", text)
 
     reply: str
     try:
         messages = [{"role": "user", "content": text}]
         response_text, _ = await openai_service.chat_with_gpt(messages, use_functions=True)
-        reply = (response_text or "").strip() or f"Принял: {text}"
+        reply = (response_text or "").strip() or "Привет! Чем могу помочь?"
     except Exception as e:
         log.warning("[CHATFLOW] OpenAI fallback: %s", type(e).__name__)
-        reply = f"Принял: {text}"
+        reply = "Привет! Чем могу помочь?"
+
+    print("[CHATFLOW] reply:", reply)
 
     try:
-        await chatflow_client.send_text(jid, reply)
-        log.info("[CHATFLOW] SEND ok jid=%s", jid[:20] + "..." if len(jid) > 20 else jid)
+        result = await chatflow_client.send_text(jid, reply)
+        print("[CHATFLOW] send status:", result.get("status_code"), result.get("response_text", "")[:500])
     except Exception as e:
         log.error("[CHATFLOW] ERROR send_text: %s", type(e).__name__)
 

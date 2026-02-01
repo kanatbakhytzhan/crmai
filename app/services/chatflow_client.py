@@ -54,10 +54,14 @@ async def send_text(jid: str, msg: str) -> dict[str, Any]:
 
         log.info("[CHATFLOW] SEND response status=%s body=%s", resp.status_code, body)
 
+        result = dict(body) if isinstance(body, dict) else {}
+        result["status_code"] = resp.status_code
+        result["response_text"] = resp.text
+
         if not (isinstance(body, dict) and body.get("success") is True):
             err_msg = body.get("message") or body.get("error") or str(body)[:200]
             raise RuntimeError(f"ChatFlow send-text failed: {err_msg}")
-        return body
+        return result
     except httpx.HTTPError as e:
         log.error("[CHATFLOW] ERROR send_text HTTP: %s", type(e).__name__)
         raise

@@ -2,6 +2,7 @@
 ChatFlow webhook: GET/POST /api/chatflow/webhook, GET /api/chatflow/ping.
 Принимает входящие сообщения от ChatFlow.kz, формирует ответ (OpenAI или echo) и отправляет через send-text.
 """
+import json
 import logging
 import re
 from typing import Any
@@ -85,13 +86,19 @@ async def chatflow_ping():
 @router.post("/webhook")
 async def chatflow_webhook_post(request: Request):
     """ChatFlow webhook POST — принять JSON, извлечь jid/text, сформировать ответ, отправить через send-text."""
-    try:
-        data = await request.json()
-    except Exception as e:
-        log.warning("[CHATFLOW] INCOMING parse error: %s", type(e).__name__)
-        return {"ok": True}
+    body = await request.body()
+    print("[CHATFLOW] RAW:", body[:2000])
 
-    log.info("[CHATFLOW] INCOMING: %s", data)
+    data = None
+    try:
+        data = json.loads(body) if body else None
+    except Exception as e:
+        print("[CHATFLOW] JSON parse error:", repr(e))
+
+    print("[CHATFLOW] INCOMING JSON:", data)
+
+    if data is None:
+        return {"ok": True}
 
     jid, text = extract_incoming(data)
     if not text:

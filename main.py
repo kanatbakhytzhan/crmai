@@ -16,7 +16,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.database.session import init_db, drop_all_tables, engine, sync_engine, Base
-from app.api.endpoints import chat, auth, admin_users, admin_tenants, whatsapp_webhook
+from app.api.endpoints import chat, auth, admin_users, admin_tenants, whatsapp_webhook, chatflow_webhook
 from app.services.telegram_service import stop_bot
 from app.admin import setup_admin
 
@@ -104,9 +104,11 @@ if not _origins_list:
         "http://127.0.0.1:5173",
         "https://buildcrm-pwa.vercel.app",
     ]
+if "https://app.chatflow.kz" not in _origins_list:
+    _origins_list = list(_origins_list) + ["https://app.chatflow.kz"]
 _CORS_ORIGIN_REGEX = r"^https://.*\.vercel\.app$"
-_CORS_ALLOW_METHODS = ["GET", "POST", "PATCH", "DELETE", "OPTIONS"]
-_CORS_ALLOW_HEADERS = ["Authorization", "Content-Type"]
+_CORS_ALLOW_METHODS = ["*"]
+_CORS_ALLOW_HEADERS = ["*"]
 print(f"[CORS] Allowed origins (final allowlist): {_origins_list}")
 print(f"[CORS] allow_origin_regex: {_CORS_ORIGIN_REGEX}")
 
@@ -156,6 +158,7 @@ app.include_router(chat.router, prefix="/api", tags=["Chat"])
 app.include_router(admin_users.router, prefix="/api/admin", tags=["Admin Users"])
 app.include_router(admin_tenants.router, prefix="/api/admin", tags=["Admin Tenants"])
 app.include_router(whatsapp_webhook.router, prefix="/api/whatsapp", tags=["WhatsApp Webhook"])
+app.include_router(chatflow_webhook.router, prefix="/api/chatflow", tags=["ChatFlow Webhook"])
 
 # Подключение админ-панели (используем СИНХРОННЫЙ engine!)
 setup_admin(app, sync_engine)

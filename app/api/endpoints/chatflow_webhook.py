@@ -46,12 +46,27 @@ EXTRA_SYSTEM_CONTEXT = (
 PHONE_REGEX = re.compile(r"^\+?[\d\s\-()]{10,15}$")
 
 
+def _normalize_command_text(text: str) -> str:
+    """Убрать пробелы/переносы, нижний регистр. Для надёжного /stop, /start."""
+    if not text:
+        return ""
+    return (text.replace("\n", " ").replace("\r", " ").strip().lower() or "")
+
+
+def _is_stop_command(text_normalized: str) -> bool:
+    return (text_normalized or "").strip() in ("/stop", "stop")
+
+
+def _is_start_command(text_normalized: str) -> bool:
+    return (text_normalized or "").strip() in ("/start", "start")
+
+
 def _parse_mute_command(text: str) -> str | None:
     """
     Команды: /stop, /start, /stop all, /start all (регистр не важен, пробелы схлопнуть).
     Возвращает: "stop" | "start" | "stop_all" | "start_all" | None.
     """
-    raw = (text or "").strip().lower()
+    raw = _normalize_command_text(text or "")
     raw = " ".join(raw.split())
     if not raw:
         return None
@@ -280,7 +295,43 @@ async def chatflow_webhook_post(request: Request, db: AsyncSession = Depends(get
         log.error("[CHATFLOW] get_or_create_conversation error: %s", type(e).__name__, exc_info=True)
         return {"ok": True}
 
-    # Сохранить входящее сообщение (raw_json для отладки)
+    text_norm = _normalize_command_text(user_text or "")
+    jid_safe = remote_jid[-4:] if len(remote_jid) >= 4 else "****"
+
+    # Команды /stop и /start — только этот чат (Conversation.ai_paused). Не сохраняем сообщение, не создаём лид.
+    if _is_stop_command(text_norm):
+        conv.ai_paused = True
+        await db.commit()
+        await db.refresh(conv)
+        log.info("[AI] command stop detected jid=...%s conv_id=%s", jid_safe, conv.id)
+        await _send_reply_and_return_ok(remote_jid, "Ок ✅ AI в этом чате выключен. Чтобы включить обратно — /start")
+        return {"ok": True}
+    if _is_start_command(text_norm):
+        conv.ai_paused = False
+        await db.commit()
+        await db.refresh(conv)
+        log.info("[AI] chat resumed jid=...%s conv_id=%s", jid_safe, conv.id)
+        await _send_reply_and_return_ok(remote_jid, "Ок ✅ AI снова включён в этом чате.")
+        return {"ok": True}
+
+    # Остальные команды (stop all / start all) и обычные сообщения
+    tenant = await _get_chatflow_tenant(db)
+    tenant_id = tenant.id if tenant else None
+    ai_enabled = getattr(tenant, "ai_enabled", True) if tenant else True
+    channel_cf = "chatflow"
+    phone_number_id_cf = ""
+
+    mute_cmd = _parse_mute_command(user_text or "")
+    if mute_cmd == "stop_all" and tenant_id is not None:
+        await crud.set_all_muted(db, channel_cf, phone_number_id_cf, True, tenant_id=tenant_id)
+        await _send_reply_and_return_ok(remote_jid, "Ок. Я отключил автоответ для всех чатов этого номера.")
+        return {"ok": True}
+    if mute_cmd == "start_all" and tenant_id is not None:
+        await crud.set_all_muted(db, channel_cf, phone_number_id_cf, False, tenant_id=tenant_id)
+        await _send_reply_and_return_ok(remote_jid, "Ок. Автоответ для всех чатов снова включён.")
+        return {"ok": True}
+
+    # Сохранить входящее сообщение
     try:
         await conversation_service.append_user_message(
             db, conv.id, user_text, raw_json=data, external_message_id=msg_id or None
@@ -289,7 +340,6 @@ async def chatflow_webhook_post(request: Request, db: AsyncSession = Depends(get
         log.error("[CHATFLOW] append_user_message error: %s", type(e).__name__, exc_info=True)
         return {"ok": True}
 
-    # Если пользователь прислал номер текстом — сохранить в текущий lead.phone (не новый диалог)
     phone_from_jid = remote_jid.split("@")[0] if "@" in remote_jid else remote_jid
     normalized_in_message = _normalize_phone(user_text)
     if normalized_in_message:
@@ -304,48 +354,15 @@ async def chatflow_webhook_post(request: Request, db: AsyncSession = Depends(get
         except Exception as e:
             log.warning("[CHATFLOW] update lead phone: %s", type(e).__name__)
 
-    # Tenant для ChatFlow: первый активный (ai_enabled, tenant_id для mute)
-    tenant = await _get_chatflow_tenant(db)
-    tenant_id = tenant.id if tenant else None
-    ai_enabled = getattr(tenant, "ai_enabled", True) if tenant else True
-    channel_cf = "chatflow"
-    phone_number_id_cf = ""  # один инстанс ChatFlow — mute общий по external_id (remote_jid)
-
-    # Команды /stop и /start — только этот чат (локальный переключатель)
-    mute_cmd = _parse_mute_command(user_text or "")
-    if mute_cmd and tenant_id is not None:
-        if mute_cmd in ("stop", "start"):
-            if mute_cmd == "stop":
-                await crud.set_chat_mute(db, tenant_id, channel_cf, phone_number_id_cf, remote_jid, is_muted=True)
-                log.info("[MUTE] chat set muted=true channel=%s phone_number_id=%s external_id=%s", channel_cf, phone_number_id_cf, remote_jid)
-                reply = "✅ Ок. Я отключил автоответ AI в этом чате. Лиды продолжат сохраняться."
-            else:
-                await crud.set_chat_mute(db, tenant_id, channel_cf, phone_number_id_cf, remote_jid, is_muted=False)
-                log.info("[MUTE] chat set muted=false channel=%s phone_number_id=%s external_id=%s", channel_cf, phone_number_id_cf, remote_jid)
-                reply = "✅ Ок. Автоответ AI снова включён в этом чате."
-            await _send_reply_and_return_ok(remote_jid, reply)
-            return {"ok": True}
-        if mute_cmd == "stop_all":
-            await crud.set_all_muted(db, channel_cf, phone_number_id_cf, True, tenant_id=tenant_id)
-            log.info("[MUTE] all set muted=true channel=%s phone_number_id=%s", channel_cf, phone_number_id_cf)
-            await _send_reply_and_return_ok(remote_jid, "Ок. Я отключил автоответ для всех чатов этого номера.")
-            return {"ok": True}
-        if mute_cmd == "start_all":
-            await crud.set_all_muted(db, channel_cf, phone_number_id_cf, False, tenant_id=tenant_id)
-            log.info("[MUTE] all set muted=false channel=%s phone_number_id=%s", channel_cf, phone_number_id_cf)
-            await _send_reply_and_return_ok(remote_jid, "Ок. Автоответ для всех чатов снова включён.")
-            return {"ok": True}
-
-    # AI отвечает только если tenant.ai_enabled и не chat_muted
+    # AI отвечает только если tenant.ai_enabled и не conv.ai_paused
     if tenant_id is None:
         log.info("[AI] skipped reply tenant=None reason=no_tenant")
         return {"ok": True}
-    chat_muted = await crud.is_chat_muted(db, tenant_id, channel_cf, phone_number_id_cf, remote_jid)
     if not ai_enabled:
         log.info("[AI] skipped reply tenant=%s reason=tenant_disabled", tenant_id)
         return {"ok": True}
-    if chat_muted:
-        log.info("[AI] skipped reply tenant=%s reason=chat_muted", tenant_id)
+    if getattr(conv, "ai_paused", False):
+        log.info("[AI] chat paused => skipping reply jid=...%s conv_id=%s", jid_safe, conv.id)
         return {"ok": True}
 
     messages_for_gpt = await conversation_service.build_context_messages(db, conv.id, limit=CONTEXT_LIMIT)

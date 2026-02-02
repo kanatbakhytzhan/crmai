@@ -88,6 +88,16 @@ async def init_db():
                     print("[OK] SQLite: tenants.ai_enabled uzhe est")
                 else:
                     print(f"[WARN] tenants.ai_enabled SQLite: {type(e).__name__}: {e}")
+            try:
+                await conn.execute(text(
+                    "ALTER TABLE conversations ADD COLUMN ai_paused INTEGER DEFAULT 0"
+                ))
+                print("[OK] SQLite: kolonka conversations.ai_paused dobavlena")
+            except Exception as e:
+                if "duplicate column" in str(e).lower():
+                    print("[OK] SQLite: conversations.ai_paused uzhe est")
+                else:
+                    print(f"[WARN] conversations.ai_paused SQLite: {type(e).__name__}: {e}")
         if "postgresql" in db_url:
             # tenant_id в leads (nullable)
             try:
@@ -136,6 +146,17 @@ async def init_db():
                 print("[OK] Kolonka tenants.ai_enabled proverena/dobavlena")
             except Exception as e:
                 print(f"[WARN] tenants.ai_enabled migration: {type(e).__name__}: {e}")
+            # conversations.ai_paused (per-chat /stop: AI не отвечает в этом чате)
+            try:
+                await conn.execute(text(
+                    "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_paused BOOLEAN DEFAULT FALSE"
+                ))
+                await conn.execute(text(
+                    "UPDATE conversations SET ai_paused = FALSE WHERE ai_paused IS NULL"
+                ))
+                print("[OK] Kolonka conversations.ai_paused proverena/dobavlena")
+            except Exception as e:
+                print(f"[WARN] conversations.ai_paused migration: {type(e).__name__}: {e}")
             # Явное CREATE TABLE IF NOT EXISTS для Render/Postgres (на случай если create_all не создал)
             try:
                 await conn.execute(text("""

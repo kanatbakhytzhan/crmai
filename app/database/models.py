@@ -65,9 +65,10 @@ class Conversation(Base):
     id = Column(Integer, primary_key=True, index=True)
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True)
     channel = Column(String, default="whatsapp", nullable=False)
-    external_id = Column(String, nullable=False)  # WA "from" number
+    external_id = Column(String, nullable=False)  # WA "from" / remoteJid
     phone_number_id = Column(String, nullable=False)
     is_active = Column(Boolean, default=True)
+    ai_paused = Column(Boolean, default=False, nullable=False)  # per-chat /stop: AI не отвечает в этом чате
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

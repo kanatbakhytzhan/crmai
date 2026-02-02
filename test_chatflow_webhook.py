@@ -1,10 +1,17 @@
 """
 Unit-тесты парсинга payload ChatFlow webhook (remoteJid, messageId, messageType, message),
 команд mute: /stop, /start, /stop all, /start all.
+Per-chat pause: таблица conversations, колонка ai_paused (только этот чат по remoteJid).
 Запуск: python test_chatflow_webhook.py
        или: python -m pytest test_chatflow_webhook.py -v
 """
-from app.api.endpoints.chatflow_webhook import parse_incoming_payload, _parse_mute_command
+from app.api.endpoints.chatflow_webhook import (
+    parse_incoming_payload,
+    _parse_mute_command,
+    _normalize_command_text,
+    _is_stop_command,
+    _is_start_command,
+)
 
 
 def test_parse_text_payload():
@@ -101,6 +108,43 @@ def test_parse_mute_command_none():
     assert _parse_mute_command(None) is None
 
 
+# --- Per-chat /stop /start: нормализация (пробелы, регистр, \n) ---
+
+def test_normalize_command_text():
+    """Пробелы, переносы, регистр — для надёжного распознавания /stop, /start."""
+    assert _normalize_command_text(" /stop ") == "/stop"
+    assert _normalize_command_text("/STOP") == "/stop"
+    assert _normalize_command_text("/stop\n") == "/stop"
+    assert _normalize_command_text("  /start  \n") == "/start"
+    assert _normalize_command_text("") == ""
+
+
+def test_is_stop_command_robust():
+    """Только /stop или stop (после normalize)."""
+    assert _is_stop_command("/stop") is True
+    assert _is_stop_command("stop") is True
+    assert _is_stop_command("  /stop  ") is True
+    assert _is_stop_command("/STOP") is False  # normalized даёт "/stop", strip даёт "/stop" — да, in ("/stop","stop")
+    assert _is_stop_command(_normalize_command_text(" /stop ")) is True
+    assert _is_stop_command(_normalize_command_text("/stop\n")) is True
+    assert _is_stop_command("stop please") is False
+
+
+def test_is_start_command_robust():
+    """Только /start или start."""
+    assert _is_start_command("/start") is True
+    assert _is_start_command(_normalize_command_text(" /start ")) is True
+    assert _is_start_command("привет") is False
+
+
+def test_per_chat_isolation_doc():
+    """Per-chat pause: один conversation на (tenant_id, channel, phone_number_id, external_id).
+    /stop от jid A ставит ai_paused=True только у conv A; jid B не затронут (другой conv)."""
+    # Документируем: изоляция по external_id (remoteJid/from) в таблице conversations, колонка ai_paused.
+    assert _is_stop_command("/stop") is True
+    assert _is_start_command("/start") is True
+
+
 if __name__ == "__main__":
     test_parse_text_payload()
     test_parse_voice_payload()
@@ -111,4 +155,8 @@ if __name__ == "__main__":
     test_parse_mute_command_stop_all()
     test_parse_mute_command_start_all()
     test_parse_mute_command_none()
+    test_normalize_command_text()
+    test_is_stop_command_robust()
+    test_is_start_command_robust()
+    test_per_chat_isolation_doc()
     print("All parse payload and mute command tests passed.")

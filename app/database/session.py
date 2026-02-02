@@ -188,6 +188,22 @@ async def init_db():
                 print("[OK] Kolonka tenants.webhook_key proverena/dobavlena")
             except Exception as e:
                 print(f"[WARN] tenants.webhook_key migration: {type(e).__name__}: {e}")
+            # Заполнить webhook_key у существующих tenants, где он пустой
+            try:
+                import secrets
+                res = await conn.execute(text("SELECT id FROM tenants WHERE webhook_key IS NULL OR webhook_key = ''"))
+                rows = res.fetchall()
+                seen = set()
+                for (tid,) in rows:
+                    key = secrets.token_urlsafe(16)
+                    while key in seen:
+                        key = secrets.token_urlsafe(16)
+                    seen.add(key)
+                    await conn.execute(text("UPDATE tenants SET webhook_key = :k WHERE id = :id"), {"k": key, "id": tid})
+                if rows:
+                    print("[OK] tenants.webhook_key zapolnen dlya", len(rows), "zapisey")
+            except Exception as e:
+                print(f"[WARN] tenants.webhook_key fill: {type(e).__name__}: {e}")
             # whatsapp_accounts: chatflow_token, chatflow_instance_id; phone_number_id nullable
             try:
                 await conn.execute(text(

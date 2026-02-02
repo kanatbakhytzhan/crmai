@@ -108,6 +108,12 @@ async def set_user_password(db: AsyncSession, user_id: int, new_password: str) -
 
 # ========== BOT USER (Клиент бота) ==========
 
+async def get_bot_user_by_id(db: AsyncSession, bot_user_id: int) -> Optional[BotUser]:
+    """Получить клиента бота по id (для lead -> remote_jid)."""
+    result = await db.execute(select(BotUser).where(BotUser.id == bot_user_id))
+    return result.scalar_one_or_none()
+
+
 async def get_bot_user_by_user_id(db: AsyncSession, user_id: str, owner_id: int) -> Optional[BotUser]:
     """Получить клиента бота по user_id (с проверкой владельца)"""
     result = await db.execute(
@@ -441,17 +447,26 @@ async def delete_lead_comment(db: AsyncSession, comment_id: int) -> bool:
 
 # ========== TENANT (multi-tenant) ==========
 
+def _generate_webhook_key() -> str:
+    """Случайный ключ для webhook (например secrets.token_urlsafe(16))."""
+    import secrets
+    return secrets.token_urlsafe(16)
+
+
 async def create_tenant(
     db: AsyncSession,
     name: str,
     slug: str,
     default_owner_user_id: Optional[int] = None,
+    webhook_key: Optional[str] = None,
 ) -> Tenant:
-    """Создать tenant."""
+    """Создать tenant. webhook_key генерируется автоматически, если не передан."""
+    key = (webhook_key or "").strip() or _generate_webhook_key()
     tenant = Tenant(
         name=name,
         slug=slug.strip().lower(),
         default_owner_user_id=default_owner_user_id,
+        webhook_key=key,
     )
     db.add(tenant)
     await db.commit()

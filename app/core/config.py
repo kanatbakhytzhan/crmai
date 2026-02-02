@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     # CORS: разрешённые origins для CRM/админки. Формат: "http://localhost:5173,https://my-pwa.com"
     # На Render задайте CORS_ORIGINS с вашим прод-доменом PWA.
     cors_origins: Optional[str] = None
+    # Публичный URL приложения (для webhook_url в админке). Например https://api.example.com
+    public_base_url: Optional[str] = None
     
     # Multi-tenant + WhatsApp (подготовка)
     multitenant_enabled: str = "false"  # "true" — фильтр лидов по tenant

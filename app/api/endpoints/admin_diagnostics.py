@@ -141,9 +141,17 @@ async def diagnostics_smoke_test(
             return {"ok": False, "reason": "whatsapp_upsert_ok_but_list_empty"}
         if accounts[0].id != acc.id:
             return {"ok": False, "reason": "whatsapp_list_first_id_mismatch"}
-        return {"ok": True}
     except Exception as e:
         return {
             "ok": False,
             "reason": f"whatsapp: {type(e).__name__}: {str(e)[:200]}",
         }
+
+    # --- 3) Tenant по webhook_key (для ChatFlow webhook?key=...) ---
+    t = tenants[0]
+    webhook_key = getattr(t, "webhook_key", None) or ""
+    if webhook_key:
+        by_key = await crud.get_tenant_by_webhook_key(db, webhook_key)
+        if not by_key or by_key.id != t.id:
+            return {"ok": False, "reason": "tenant_by_webhook_key_mismatch"}
+    return {"ok": True}

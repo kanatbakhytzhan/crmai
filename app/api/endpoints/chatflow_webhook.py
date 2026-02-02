@@ -243,8 +243,8 @@ async def _send_reply_and_return_ok(jid: str, reply: str) -> None:
 
 
 @router.get("/webhook")
-async def chatflow_webhook_get():
-    """ChatFlow webhook GET — проверка доступности (CORS OPTIONS обрабатывается в main)."""
+async def chatflow_webhook_get(key: str | None = None):
+    """ChatFlow webhook GET — health. Опционально ?key=... для проверки привязки tenant."""
     return {"ok": True}
 
 
@@ -295,12 +295,13 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
     if not (user_text and user_text.strip()):
         return {"ok": True}
 
-    # A) Tenant только по привязке (instance_id или webhook_key). Без fallback.
+    # A) Tenant только по привязке (resolved_tenant или instance_id в payload). Без fallback.
     tenant = await _resolve_tenant(db, data, resolved_tenant)
     if not tenant:
         log.warning("[AI] SKIP tenant not found for chatflow instance")
         return {"ok": True}
     tenant_id = tenant.id
+    log.info("[CHATFLOW] tenant_id=%s remote_jid=%s msg_id=%s", tenant_id, remote_jid, msg_id)
 
     # A) WhatsApp attach активен и заполнены критичные поля (token OR instance_id)
     acc = await crud.get_active_chatflow_account_for_tenant(db, tenant_id)
@@ -406,10 +407,11 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
             log.warning("[CHATFLOW] update lead phone: %s", type(e).__name__)
 
     # AI отвечает только если tenant.ai_enabled и chat_ai_state для этого чата (remoteJid) включён
+    chat_ai_enabled = await crud.get_chat_ai_state(db, tenant_id, remote_jid)
+    log.info("[CHATFLOW] tenant_id=%s remoteJid=...%s msg_id=%s ai_enabled_global=%s ai_muted_in_chat=%s", tenant_id, jid_safe, msg_id, ai_enabled, not chat_ai_enabled)
     if not ai_enabled:
         log.info("[AI] skipped reply tenant=%s reason=tenant_disabled", tenant_id)
         return {"ok": True}
-    chat_ai_enabled = await crud.get_chat_ai_state(db, tenant_id, remote_jid)
     if not chat_ai_enabled:
         log.info("[AI] chat paused (chat_ai_state) jid=...%s tenant_id=%s", jid_safe, tenant_id)
         return {"ok": True}
@@ -506,12 +508,15 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
 
 
 @router.post("/webhook")
-async def chatflow_webhook_post(request: Request, db: AsyncSession = Depends(get_db)):
+async def chatflow_webhook_post(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    key: str | None = None,
+):
     """
-    1) Парсинг remote_jid, msg_id, messageType, message.
-    2) Дедуп по msg_id → return {"ok": True, "dedup": True}.
-    3) Tenant: по instance_id/client_id в payload (whatsapp_accounts.chatflow_instance_id), иначе первый активный (fallback).
-    4) Остальная логика — см. _process_webhook.
+    ChatFlow webhook: tenant по query ?key=webhook_key.
+    Если key отсутствует или tenant не найден — возвращаем {"ok": true} и НИЧЕГО не отправляем в WhatsApp.
+    Если tenant найден — используем tenant.ai_enabled, tenant.ai_prompt, контекст по jid.
     """
     body = await request.body()
     data = None
@@ -521,7 +526,15 @@ async def chatflow_webhook_post(request: Request, db: AsyncSession = Depends(get
         log.warning("[CHATFLOW] JSON parse error: %s", repr(e))
     if data is None or not isinstance(data, dict):
         return {"ok": True}
-    return await _process_webhook(db, data, resolved_tenant=None)
+    key_present = bool((key or "").strip())
+    if not key_present:
+        log.info("[CHATFLOW] no key in query, skip reply")
+        return {"ok": True}
+    tenant = await crud.get_tenant_by_webhook_key(db, (key or "").strip())
+    if not tenant:
+        log.warning("[CHATFLOW] tenant not found for key=..., skip reply")
+        return {"ok": True}
+    return await _process_webhook(db, data, resolved_tenant=tenant)
 
 
 @router.post("/webhook/{tenant_key}")

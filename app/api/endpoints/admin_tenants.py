@@ -25,13 +25,27 @@ from app.schemas.tenant import (
 router = APIRouter()
 
 
-@router.post("/tenants", response_model=TenantResponse, status_code=status.HTTP_201_CREATED)
+def _tenant_response(tenant, base_url: str) -> dict:
+    """TenantResponse с вычисляемым webhook_url."""
+    from app.schemas.tenant import TenantResponse
+    data = TenantResponse.model_validate(tenant).model_dump()
+    base = (base_url or "").rstrip("/")
+    if getattr(tenant, "webhook_key", None) and base:
+        data["webhook_url"] = f"{base}/api/chatflow/webhook?key={tenant.webhook_key}"
+    else:
+        data["webhook_url"] = None
+    return data
+
+
+@router.post("/tenants", status_code=status.HTTP_201_CREATED)
 async def create_tenant(
+    request: Request,
     body: TenantCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_admin),
 ):
-    """Создать tenant (name, slug, optional default_owner_user_id)."""
+    """Создать tenant (name, slug, optional default_owner_user_id). webhook_key генерируется автоматически."""
+    from app.core.config import get_settings
     existing = await crud.get_tenant_by_slug(db, body.slug)
     if existing:
         raise HTTPException(
@@ -44,17 +58,20 @@ async def create_tenant(
         slug=body.slug,
         default_owner_user_id=body.default_owner_user_id,
     )
-    return TenantResponse.model_validate(tenant)
+    base_url = get_settings().public_base_url or str(request.base_url).rstrip("/")
+    return _tenant_response(tenant, base_url)
 
 
-@router.patch("/tenants/{tenant_id}", response_model=TenantResponse)
+@router.patch("/tenants/{tenant_id}")
 async def update_tenant(
+    request: Request,
     tenant_id: int,
     body: TenantUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_admin),
 ):
     """Обновить tenant: name, slug, is_active, default_owner_user_id, ai_enabled, ai_prompt, webhook_key."""
+    from app.core.config import get_settings
     tenant = await crud.update_tenant(
         db,
         tenant_id,
@@ -68,32 +85,39 @@ async def update_tenant(
     )
     if not tenant:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
-    return TenantResponse.model_validate(tenant)
+    base_url = get_settings().public_base_url or str(request.base_url).rstrip("/")
+    return _tenant_response(tenant, base_url)
 
 
 @router.get("/tenants/{tenant_id}", response_model=dict)
 async def get_tenant(
+    request: Request,
     tenant_id: int,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_admin),
 ):
-    """Один tenant + текущая привязка WhatsApp (whatsapp_connection) для формы редактирования."""
+    """Один tenant + текущая привязка WhatsApp (whatsapp_connection). webhook_url в tenant."""
+    from app.core.config import get_settings
     tenant = await crud.get_tenant_by_id(db, tenant_id)
     if not tenant:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
     accounts = await crud.list_whatsapp_accounts_by_tenant(db, tenant_id)
     whatsapp_connection = WhatsAppAccountResponse.model_validate(accounts[0]) if accounts else None
-    return {"tenant": TenantResponse.model_validate(tenant), "whatsapp_connection": whatsapp_connection}
+    base_url = get_settings().public_base_url or str(request.base_url).rstrip("/")
+    return {"tenant": _tenant_response(tenant, base_url), "whatsapp_connection": whatsapp_connection}
 
 
 @router.get("/tenants", response_model=dict)
 async def list_tenants(
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_admin),
 ):
-    """Список tenants."""
+    """Список tenants. В каждом tenant есть webhook_key и webhook_url."""
+    from app.core.config import get_settings
     tenants = await crud.list_tenants(db)
-    return {"tenants": [TenantResponse.model_validate(t) for t in tenants], "total": len(tenants)}
+    base_url = get_settings().public_base_url or str(request.base_url).rstrip("/")
+    return {"tenants": [_tenant_response(t, base_url) for t in tenants], "total": len(tenants)}
 
 
 @router.get("/tenants/{tenant_id}/users", response_model=dict)

@@ -74,6 +74,11 @@ class LeadCommentCreate(BaseModel):
     text: str = Field(..., min_length=1)
 
 
+class AIMuteUpdate(BaseModel):
+    """POST /api/leads/{lead_id}/ai-mute — включить/выключить AI в чате лида."""
+    muted: bool = Field(..., description="true = отключить AI в этом чате, false = включить")
+
+
 class LeadCommentResponse(BaseModel):
     """Комментарий к лиду"""
     id: int

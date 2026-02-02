@@ -29,6 +29,7 @@ class TenantResponse(BaseModel):
     ai_enabled: bool = True
     ai_prompt: Optional[str] = None
     webhook_key: Optional[str] = None
+    webhook_url: Optional[str] = None  # вычисляемое: BASE_URL + /api/chatflow/webhook?key= + webhook_key
     created_at: datetime
 
     class Config:

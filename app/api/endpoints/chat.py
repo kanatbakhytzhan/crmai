@@ -12,7 +12,7 @@ from app.api.deps import get_db, get_current_user
 from app.core.config import get_settings
 from app.database import crud
 from app.database.models import User
-from app.schemas.lead import LeadResponse, LeadCommentCreate, LeadCommentResponse
+from app.schemas.lead import LeadResponse, LeadCommentCreate, LeadCommentResponse, AIMuteUpdate
 from app.services import openai_service, telegram_service, conversation_service
 
 router = APIRouter()
@@ -393,6 +393,60 @@ async def delete_lead(
         "status": "success",
         "message": f"Lead {lead_id} deleted successfully"
     }
+
+
+@router.get("/leads/{lead_id}/ai-status", response_model=dict)
+async def get_lead_ai_status(
+    lead_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Статус AI для чата лида: ai_enabled_global (tenant), ai_muted_in_chat (per-chat mute).
+    Требует JWT. Доступ: владелец лида или пользователь tenant.
+    remote_jid берётся из lead.bot_user.user_id (для ChatFlow).
+    """
+    multitenant = (getattr(get_settings(), "multitenant_enabled", "false") or "false").upper() == "TRUE"
+    lead = await crud.get_lead_by_id(db, lead_id, current_user.id, multitenant_include_tenant_leads=multitenant)
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    tenant_id = getattr(lead, "tenant_id", None)
+    if tenant_id is None:
+        return {"ai_enabled_global": True, "ai_muted_in_chat": False}
+    bot_user = await crud.get_bot_user_by_id(db, lead.bot_user_id)
+    remote_jid = (bot_user.user_id if bot_user else "") or ""
+    tenant = await crud.get_tenant_by_id(db, tenant_id)
+    ai_enabled_global = getattr(tenant, "ai_enabled", True) if tenant else True
+    chat_enabled = await crud.get_chat_ai_state(db, tenant_id, remote_jid)
+    ai_muted_in_chat = not chat_enabled
+    return {"ai_enabled_global": ai_enabled_global, "ai_muted_in_chat": ai_muted_in_chat}
+
+
+@router.post("/leads/{lead_id}/ai-mute", response_model=dict)
+async def post_lead_ai_mute(
+    lead_id: int,
+    body: AIMuteUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Включить/выключить AI в чате лида (per-chat mute). Upsert в chat_ai_states по (tenant_id, remote_jid).
+    body: { "muted": true/false }. remote_jid = lead.bot_user.user_id.
+    Требует JWT. Доступ: владелец лида или пользователь tenant.
+    """
+    multitenant = (getattr(get_settings(), "multitenant_enabled", "false") or "false").upper() == "TRUE"
+    lead = await crud.get_lead_by_id(db, lead_id, current_user.id, multitenant_include_tenant_leads=multitenant)
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    tenant_id = getattr(lead, "tenant_id", None)
+    if tenant_id is None:
+        raise HTTPException(status_code=400, detail="Lead has no tenant_id (cannot set per-chat mute)")
+    bot_user = await crud.get_bot_user_by_id(db, lead.bot_user_id)
+    remote_jid = (bot_user.user_id if bot_user else "") or ""
+    if not remote_jid:
+        raise HTTPException(status_code=400, detail="Lead has no remote_jid (bot_user.user_id)")
+    await crud.set_chat_ai_state(db, tenant_id, remote_jid, enabled=not body.muted)
+    return {"ok": True, "muted": body.muted}
 
 
 @router.get("/leads/{lead_id}/comments", response_model=dict)

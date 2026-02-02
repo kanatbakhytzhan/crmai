@@ -1,5 +1,5 @@
 """Схемы для tenants, tenant_users и whatsapp_accounts (multi-tenant)."""
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, AliasChoices
 from datetime import datetime
 from typing import Optional
 
@@ -78,14 +78,14 @@ class TenantUserResponse(BaseModel):
 
 
 class WhatsAppAccountCreate(BaseModel):
-    """Привязка WhatsApp к tenant (Meta Cloud и/или ChatFlow). При active=true обязательны chatflow_token и chatflow_instance_id."""
-    phone_number: str = "—"
+    """Привязка WhatsApp к tenant. Принимает chatflow_token или token, chatflow_instance_id или instance_id, is_active или active."""
+    phone_number: str = Field("—", validation_alias=AliasChoices("phone_number", "phone"))
     phone_number_id: Optional[str] = None
     verify_token: Optional[str] = None
     waba_id: Optional[str] = None
-    chatflow_token: Optional[str] = None
-    chatflow_instance_id: Optional[str] = None
-    is_active: bool = True
+    chatflow_token: Optional[str] = Field(None, validation_alias=AliasChoices("chatflow_token", "token"))
+    chatflow_instance_id: Optional[str] = Field(None, validation_alias=AliasChoices("chatflow_instance_id", "instance_id"))
+    is_active: bool = Field(True, validation_alias=AliasChoices("is_active", "active"))
 
 
 class WhatsAppAccountResponse(BaseModel):
@@ -106,8 +106,18 @@ class WhatsAppAccountResponse(BaseModel):
 
 
 class WhatsAppAccountUpsert(BaseModel):
-    """PUT /api/admin/tenants/{id}/whatsapp — сохранить/обновить привязку (token, instance_id, phone_number, active)."""
-    chatflow_token: Optional[str] = None
+    """PUT /api/admin/tenants/{id}/whatsapp — сохранить/обновить привязку. Принимает token/chatflow_token, instance_id/chatflow_instance_id, active/is_active."""
+    chatflow_token: Optional[str] = Field(None, validation_alias=AliasChoices("chatflow_token", "token"))
+    chatflow_instance_id: Optional[str] = Field(None, validation_alias=AliasChoices("chatflow_instance_id", "instance_id"))
+    phone_number: Optional[str] = Field(None, validation_alias=AliasChoices("phone_number", "phone"))
+    is_active: bool = Field(True, validation_alias=AliasChoices("is_active", "active"))
+
+
+class WhatsAppSaved(BaseModel):
+    """Сохранённые значения привязки для ответа attach и list (id, tenant_id, phone_number, active, chatflow_instance_id, chatflow_token)."""
+    id: int
+    tenant_id: int
+    phone_number: str
+    active: bool
     chatflow_instance_id: Optional[str] = None
-    phone_number: Optional[str] = None
-    is_active: bool = True
+    chatflow_token: Optional[str] = None  # полное значение, чтобы фронт видел что сохранилось

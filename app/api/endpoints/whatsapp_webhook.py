@@ -105,6 +105,9 @@ async def webhook_post(
                 continue
             tenant_id = acc.tenant_id
             phone_number_id_str = str(phone_number_id)
+            tenant = await crud.get_tenant_by_id(db, tenant_id)
+            ai_enabled = getattr(tenant, "ai_enabled", True)
+
             messages_list = value.get("messages") or []
             for msg in messages_list:
                 text = ""
@@ -123,10 +126,35 @@ async def webhook_post(
                 await conversation_service.append_user_message(db, conv.id, text, raw_json=msg)
                 log.info(f"[WA][CHAT] conv_id={conv.id} tenant_id={tenant_id} from={from_wa_id} stored user msg")
 
+                # Команды /stop и /start (только текст, регистр не важен). MVP: любой отправитель в чате tenant.
+                cmd_raw = (text or "").strip().lower()
+                cmd = "none"
+                if cmd_raw in ("/stop", "stop"):
+                    cmd = "stop"
+                elif cmd_raw in ("/start", "start"):
+                    cmd = "start"
+                log.info("[AI] tenant=%s ai_enabled=%s cmd=%s", tenant_id, ai_enabled, cmd)
+
+                if cmd == "stop":
+                    await crud.update_tenant(db, tenant_id, ai_enabled=False)
+                    await whatsapp_cloud_api.send_text_message(
+                        phone_number_id_str, from_wa_id, "AI-менеджер выключен ✅ Команда применена для этого аккаунта."
+                    )
+                    continue
+                if cmd == "start":
+                    await crud.update_tenant(db, tenant_id, ai_enabled=True)
+                    await whatsapp_cloud_api.send_text_message(
+                        phone_number_id_str, from_wa_id, "AI-менеджер включен ✅ Команда применена для этого аккаунта."
+                    )
+                    continue
+
+                if not ai_enabled:
+                    # Входящие сохраняем, автоответ не отправляем
+                    continue
+
                 messages_for_gpt = await conversation_service.build_context_messages(db, conv.id, limit=20)
                 log.info(f"[WA][CHAT] loaded {len(messages_for_gpt)} context messages")
 
-                tenant = await crud.get_tenant_by_id(db, tenant_id)
                 ai_prompt_override = (getattr(tenant, "ai_prompt", None) or "").strip() or None
 
                 assistant_reply = ""

@@ -12,7 +12,7 @@
 
 ## Таблицы
 
-- `tenants` — клиенты (id, name, slug, is_active, default_owner_user_id, created_at). **Установите `default_owner_user_id`** (ID пользователя из `users`), чтобы лиды из WhatsApp попадали в CRM этому пользователю.
+- `tenants` — клиенты (id, name, slug, is_active, default_owner_user_id, ai_enabled, ai_prompt, created_at). **Установите `default_owner_user_id`** (ID пользователя из `users`), чтобы лиды из WhatsApp попадали в CRM этому пользователю. **ai_enabled** (по умолчанию true) — вкл/выкл автоответ AI для этого tenant.
 - `whatsapp_accounts` — привязка номера к tenant (tenant_id, phone_number, phone_number_id, verify_token, waba_id, …).
 - `leads` — добавлено поле `tenant_id` (nullable). При создании из webhook `owner_id` берётся из `tenant.default_owner_user_id`; если NULL — fallback на первого пользователя (в лог пишется предупреждение).
 
@@ -36,7 +36,7 @@ curl -i -X PATCH "http://localhost:8000/api/admin/tenants/1" \
 ## Webhook Meta
 
 - `GET /api/whatsapp/webhook` — верификация: `hub.mode`, `hub.verify_token`, `hub.challenge`. Токен сверяется с `WHATSAPP_VERIFY_TOKEN` или с `whatsapp_accounts.verify_token`.
-- `POST /api/whatsapp/webhook` — приём сообщений. По `phone_number_id` из payload находится tenant, создаётся lead с `owner_id = tenant.default_owner_user_id` (или первый пользователь с предупреждением в лог) и текстом сообщения.
+- `POST /api/whatsapp/webhook` — приём сообщений. По `phone_number_id` из payload находится tenant, создаётся lead с `owner_id = tenant.default_owner_user_id` (или первый пользователь с предупреждением в лог) и текстом сообщения. Если у tenant **ai_enabled=false**, входящие сохраняются, автоответ не отправляется. В чате: текст **/stop** или **stop** — выключить AI для этого tenant; **/start** или **start** — включить AI (ответ «AI-менеджер выключен/включен ✅»).
 
 ## Проверка локально (curl)
 

@@ -20,6 +20,7 @@ class Tenant(Base):
     is_active = Column(Boolean, default=True)
     default_owner_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     ai_prompt = Column(Text, nullable=True)  # кастомный system prompt для OpenAI (если пусто — дефолтный)
+    ai_enabled = Column(Boolean, default=True, nullable=False)  # автоответ AI вкл/выкл (команды /start /stop)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     whatsapp_accounts = relationship("WhatsAppAccount", back_populates="tenant", cascade="all, delete-orphan")

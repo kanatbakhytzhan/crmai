@@ -12,6 +12,8 @@ from app.schemas.tenant import (
     TenantCreate,
     TenantUpdate,
     TenantResponse,
+    AISettingsResponse,
+    AISettingsUpdate,
     WhatsAppAccountCreate,
     WhatsAppAccountResponse,
 )
@@ -48,7 +50,7 @@ async def update_tenant(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_admin),
 ):
-    """Обновить tenant: name, slug, is_active, default_owner_user_id."""
+    """Обновить tenant: name, slug, is_active, default_owner_user_id, ai_enabled, ai_prompt."""
     tenant = await crud.update_tenant(
         db,
         tenant_id,
@@ -56,6 +58,8 @@ async def update_tenant(
         slug=body.slug,
         is_active=body.is_active,
         default_owner_user_id=body.default_owner_user_id,
+        ai_enabled=body.ai_enabled,
+        ai_prompt=body.ai_prompt,
     )
     if not tenant:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
@@ -70,6 +74,46 @@ async def list_tenants(
     """Список tenants."""
     tenants = await crud.list_tenants(db)
     return {"tenants": [TenantResponse.model_validate(t) for t in tenants], "total": len(tenants)}
+
+
+@router.get("/tenants/{tenant_id}/ai-settings", response_model=AISettingsResponse)
+async def get_ai_settings(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin),
+):
+    """Настройки AI для tenant: ai_enabled, ai_prompt."""
+    tenant = await crud.get_tenant_by_id(db, tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
+    return AISettingsResponse(
+        ai_enabled=getattr(tenant, "ai_enabled", True),
+        ai_prompt=getattr(tenant, "ai_prompt", None),
+    )
+
+
+@router.patch("/tenants/{tenant_id}/ai-settings", response_model=AISettingsResponse)
+async def update_ai_settings(
+    tenant_id: int,
+    body: AISettingsUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin),
+):
+    """Обновить настройки AI: ai_enabled, ai_prompt (без изменения остальных полей tenant)."""
+    tenant = await crud.get_tenant_by_id(db, tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
+    await crud.update_tenant(
+        db,
+        tenant_id,
+        ai_enabled=body.ai_enabled,
+        ai_prompt=body.ai_prompt,
+    )
+    tenant = await crud.get_tenant_by_id(db, tenant_id)
+    return AISettingsResponse(
+        ai_enabled=getattr(tenant, "ai_enabled", True),
+        ai_prompt=getattr(tenant, "ai_prompt", None),
+    )
 
 
 @router.post("/tenants/{tenant_id}/whatsapp", response_model=WhatsAppAccountResponse, status_code=status.HTTP_201_CREATED)

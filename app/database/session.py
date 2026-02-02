@@ -78,6 +78,16 @@ async def init_db():
                     print("[OK] SQLite: is_admin uzhe est")
                 else:
                     print(f"[WARN] is_admin SQLite: {type(e).__name__}: {e}")
+            try:
+                await conn.execute(text(
+                    "ALTER TABLE tenants ADD COLUMN ai_enabled INTEGER DEFAULT 1"
+                ))
+                print("[OK] SQLite: kolonka tenants.ai_enabled dobavlena")
+            except Exception as e:
+                if "duplicate column" in str(e).lower():
+                    print("[OK] SQLite: tenants.ai_enabled uzhe est")
+                else:
+                    print(f"[WARN] tenants.ai_enabled SQLite: {type(e).__name__}: {e}")
         if "postgresql" in db_url:
             # tenant_id в leads (nullable)
             try:
@@ -115,6 +125,17 @@ async def init_db():
                 print("[OK] Kolonka tenants.ai_prompt proverena/dobavlena")
             except Exception as e:
                 print(f"[WARN] tenants.ai_prompt migration: {type(e).__name__}: {e}")
+            # tenants.ai_enabled (AI-менеджер вкл/выкл для tenant)
+            try:
+                await conn.execute(text(
+                    "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS ai_enabled BOOLEAN DEFAULT TRUE"
+                ))
+                await conn.execute(text(
+                    "UPDATE tenants SET ai_enabled = TRUE WHERE ai_enabled IS NULL"
+                ))
+                print("[OK] Kolonka tenants.ai_enabled proverena/dobavlena")
+            except Exception as e:
+                print(f"[WARN] tenants.ai_enabled migration: {type(e).__name__}: {e}")
             # Явное CREATE TABLE IF NOT EXISTS для Render/Postgres (на случай если create_all не создал)
             try:
                 await conn.execute(text("""

@@ -456,6 +456,8 @@ async def update_tenant(
     slug: Optional[str] = None,
     is_active: Optional[bool] = None,
     default_owner_user_id: Optional[int] = None,
+    ai_enabled: Optional[bool] = None,
+    ai_prompt: Optional[str] = None,
 ) -> Optional[Tenant]:
     """Обновить tenant."""
     tenant = await get_tenant_by_id(db, tenant_id)
@@ -469,6 +471,10 @@ async def update_tenant(
         tenant.is_active = is_active
     if default_owner_user_id is not None:
         tenant.default_owner_user_id = default_owner_user_id
+    if ai_enabled is not None:
+        tenant.ai_enabled = ai_enabled
+    if ai_prompt is not None:
+        tenant.ai_prompt = ai_prompt
     await db.commit()
     await db.refresh(tenant)
     return tenant

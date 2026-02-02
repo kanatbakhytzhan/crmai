@@ -1,9 +1,10 @@
 """
-Unit-тесты парсинга payload ChatFlow webhook (remoteJid, messageId, messageType, message).
+Unit-тесты парсинга payload ChatFlow webhook (remoteJid, messageId, messageType, message),
+команд /stop /start и логики ai_enabled.
 Запуск: python test_chatflow_webhook.py
        или: python -m pytest test_chatflow_webhook.py -v
 """
-from app.api.endpoints.chatflow_webhook import parse_incoming_payload
+from app.api.endpoints.chatflow_webhook import parse_incoming_payload, _detect_command
 
 
 def test_parse_text_payload():
@@ -61,9 +62,38 @@ def test_parse_message_as_dict():
     assert text == "Привет"
 
 
+# --- Команды /stop /start и ai_enabled ---
+
+def test_detect_command_stop():
+    """Команда stop: /stop или stop, регистр не важен."""
+    assert _detect_command("/stop") == "stop"
+    assert _detect_command("stop") == "stop"
+    assert _detect_command("  STOP  ") == "stop"
+    assert _detect_command("/STOP") == "stop"
+
+
+def test_detect_command_start():
+    """Команда start: /start или start."""
+    assert _detect_command("/start") == "start"
+    assert _detect_command("start") == "start"
+    assert _detect_command("  Start  ") == "start"
+
+
+def test_detect_command_none():
+    """Не команда — обычный текст."""
+    assert _detect_command("привет") == "none"
+    assert _detect_command("stop please") == "none"
+    assert _detect_command("") == "none"
+    assert _detect_command("   ") == "none"
+    assert _detect_command(None) == "none"
+
+
 if __name__ == "__main__":
     test_parse_text_payload()
     test_parse_voice_payload()
     test_parse_empty_or_invalid()
     test_parse_message_as_dict()
-    print("All parse payload tests passed.")
+    test_detect_command_stop()
+    test_detect_command_start()
+    test_detect_command_none()
+    print("All parse payload and command tests passed.")

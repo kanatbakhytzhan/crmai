@@ -15,6 +15,8 @@ class TenantUpdate(BaseModel):
     slug: Optional[str] = None
     is_active: Optional[bool] = None
     default_owner_user_id: Optional[int] = None
+    ai_enabled: Optional[bool] = None
+    ai_prompt: Optional[str] = None
 
 
 class TenantResponse(BaseModel):
@@ -23,10 +25,24 @@ class TenantResponse(BaseModel):
     slug: str
     is_active: bool
     default_owner_user_id: Optional[int] = None
+    ai_enabled: bool = True
+    ai_prompt: Optional[str] = None
     created_at: datetime
 
     class Config:
         from_attributes = True
+
+
+class AISettingsResponse(BaseModel):
+    """GET /api/admin/tenants/{id}/ai-settings"""
+    ai_enabled: bool
+    ai_prompt: Optional[str] = None
+
+
+class AISettingsUpdate(BaseModel):
+    """PATCH /api/admin/tenants/{id}/ai-settings"""
+    ai_enabled: Optional[bool] = None
+    ai_prompt: Optional[str] = None
 
 
 class WhatsAppAccountCreate(BaseModel):

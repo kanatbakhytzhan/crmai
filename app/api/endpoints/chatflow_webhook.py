@@ -46,6 +46,16 @@ EXTRA_SYSTEM_CONTEXT = (
 PHONE_REGEX = re.compile(r"^\+?[\d\s\-()]{10,15}$")
 
 
+def _detect_command(text: str) -> str:
+    """Определить команду по тексту: 'stop' | 'start' | 'none'. Регистр не важен."""
+    raw = (text or "").strip().lower()
+    if raw in ("/stop", "stop"):
+        return "stop"
+    if raw in ("/start", "start"):
+        return "start"
+    return "none"
+
+
 def _normalize_phone(text: str) -> str | None:
     r"""Распознать номер из текста (+?\d{10,15}). Вернуть нормализованный (+77...) или None."""
     if not text or not text.strip():
@@ -76,6 +86,12 @@ async def _get_default_owner_id(db: AsyncSession) -> int | None:
             return user.id
     user = await crud.get_first_user(db)
     return user.id if user else None
+
+
+async def _get_chatflow_tenant(db: AsyncSession):
+    """Первый активный tenant для ChatFlow (ai_enabled, команды /stop /start)."""
+    tenants = await crud.list_tenants(db, active_only=True)
+    return tenants[0] if tenants else None
 
 
 def parse_incoming_payload(data: dict[str, Any] | None) -> tuple[str, str, str, str]:
@@ -277,6 +293,32 @@ async def chatflow_webhook_post(request: Request, db: AsyncSession = Depends(get
                     log.info("[CHATFLOW] lead phone updated lead_id=%s phone=%s", active_lead.id, normalized_in_message)
         except Exception as e:
             log.warning("[CHATFLOW] update lead phone: %s", type(e).__name__)
+
+    # Tenant для ChatFlow: первый активный (ai_enabled, команды /stop /start)
+    tenant = await _get_chatflow_tenant(db)
+    tenant_id = tenant.id if tenant else None
+    ai_enabled = getattr(tenant, "ai_enabled", True) if tenant else True
+
+    # Команды /stop и /start (текст, регистр не важен). MVP: любой отправитель.
+    cmd = _detect_command(user_text or "")
+    log.info("[AI] tenant=%s ai_enabled=%s cmd=%s", tenant_id, ai_enabled, cmd)
+
+    if cmd == "stop" and tenant:
+        await crud.update_tenant(db, tenant_id, ai_enabled=False)
+        await _send_reply_and_return_ok(
+            remote_jid, "AI-менеджер выключен ✅ Команда применена для этого аккаунта."
+        )
+        return {"ok": True}
+    if cmd == "start" and tenant:
+        await crud.update_tenant(db, tenant_id, ai_enabled=True)
+        await _send_reply_and_return_ok(
+            remote_jid, "AI-менеджер включен ✅ Команда применена для этого аккаунта."
+        )
+        return {"ok": True}
+
+    if not ai_enabled:
+        # Входящие уже сохранены, автоответ не отправляем
+        return {"ok": True}
 
     messages_for_gpt = await conversation_service.build_context_messages(db, conv.id, limit=CONTEXT_LIMIT)
     log.info("[CHATFLOW] messages loaded count=%s", len(messages_for_gpt))

@@ -56,8 +56,18 @@ class WhatsAppAccount(Base):
     chatflow_instance_id = Column(String(255), nullable=True, index=True)  # instance_id из payload → tenant
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     tenant = relationship("Tenant", back_populates="whatsapp_accounts")
+
+    @property
+    def chatflow_token_masked(self) -> str | None:
+        """Маскированный токен для ответа API (первые 4 символа + ***)."""
+        t = getattr(self, "chatflow_token", None) or ""
+        if not (t and str(t).strip()):
+            return None
+        s = str(t).strip()
+        return s[:4] + "***" if len(s) > 4 else "***"
 
 
 class Conversation(Base):

@@ -238,7 +238,7 @@ async def upsert_whatsapp(
     phone_number = (body.phone_number or "").strip() or "—"
     instance_id = (body.chatflow_instance_id or "").strip() or None
     token = (body.chatflow_token or "").strip() or None
-    print("[ADMIN] whatsapp upsert", tenant_id, instance_id, phone_number, body.is_active)
+    print("[ADMIN] whatsapp upsert tenant_id=%s active=%s phone_number=%s token_len=%s instance_len=%s", tenant_id, body.is_active, phone_number, len(body.chatflow_token or ""), len(body.chatflow_instance_id or ""))
     acc = await crud.upsert_whatsapp_for_tenant(
         db,
         tenant_id=tenant_id,
@@ -247,6 +247,7 @@ async def upsert_whatsapp(
         chatflow_instance_id=instance_id,
         is_active=body.is_active,
     )
+    print("[ADMIN] whatsapp upsert saved id=%s", acc.id)
     return WhatsAppAccountResponse.model_validate(acc)
 
 
@@ -258,23 +259,39 @@ async def attach_whatsapp(
     current_user: User = Depends(get_current_admin),
 ):
     """
-    Привязать WhatsApp (Meta Cloud и/или ChatFlow) к tenant (создать новую запись).
-    Для формы редактирования используйте PUT /tenants/{tenant_id}/whatsapp (upsert).
-    Body: phone_number, phone_number_id (для Meta), chatflow_token, chatflow_instance_id (для ChatFlow).
+    Привязать/обновить WhatsApp (UPSERT): одна запись на tenant.
+    Если запись уже есть — обновить (chatflow_token, chatflow_instance_id, phone_number, active).
+    Ответ — сохранённые значения (chatflow_token маскирован как chatflow_token_masked).
+    При active=true обязательны chatflow_token и chatflow_instance_id.
+    При active=false можно сохранять с пустыми token/instance_id (существующие не затираются).
     """
     tenant = await crud.get_tenant_by_id(db, tenant_id)
     if not tenant:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
-    acc = await crud.create_whatsapp_account(
+    if body.is_active:
+        token_ok = (body.chatflow_token or "").strip()
+        instance_ok = (body.chatflow_instance_id or "").strip()
+        if not token_ok or not instance_ok:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="When active=true, chatflow_token and chatflow_instance_id are required",
+            )
+    token = (body.chatflow_token or "").strip() or None
+    instance_id = (body.chatflow_instance_id or "").strip() or None
+    phone_number = (body.phone_number or "").strip() or "—"
+    token_len = len(body.chatflow_token or "")
+    instance_len = len(body.chatflow_instance_id or "")
+    print("[ADMIN] whatsapp attach input tenant_id=%s active=%s phone_number=%s token_len=%s instance_len=%s", tenant_id, body.is_active, phone_number, token_len, instance_len)
+    acc = await crud.upsert_whatsapp_for_tenant(
         db,
         tenant_id=tenant_id,
-        phone_number=body.phone_number,
+        phone_number=phone_number,
         phone_number_id=body.phone_number_id,
-        verify_token=body.verify_token,
-        waba_id=body.waba_id,
-        chatflow_token=body.chatflow_token,
-        chatflow_instance_id=body.chatflow_instance_id,
+        chatflow_token=token,
+        chatflow_instance_id=instance_id,
+        is_active=body.is_active,
     )
+    print("[ADMIN] whatsapp attach saved id=%s", acc.id)
     return WhatsAppAccountResponse.model_validate(acc)
 
 

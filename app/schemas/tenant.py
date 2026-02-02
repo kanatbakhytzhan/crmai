@@ -78,16 +78,18 @@ class TenantUserResponse(BaseModel):
 
 
 class WhatsAppAccountCreate(BaseModel):
-    """Привязка WhatsApp к tenant (Meta Cloud и/или ChatFlow). phone_number_id обязателен для Meta."""
-    phone_number: str
-    phone_number_id: Optional[str] = None  # для ChatFlow-only можно пусто
+    """Привязка WhatsApp к tenant (Meta Cloud и/или ChatFlow). При active=true обязательны chatflow_token и chatflow_instance_id."""
+    phone_number: str = "—"
+    phone_number_id: Optional[str] = None
     verify_token: Optional[str] = None
     waba_id: Optional[str] = None
     chatflow_token: Optional[str] = None
     chatflow_instance_id: Optional[str] = None
+    is_active: bool = True
 
 
 class WhatsAppAccountResponse(BaseModel):
+    """Ответ с сохранёнными значениями; chatflow_token не возвращается, только chatflow_token_masked."""
     id: int
     tenant_id: int
     phone_number: str
@@ -95,7 +97,8 @@ class WhatsAppAccountResponse(BaseModel):
     waba_id: Optional[str] = None
     is_active: bool
     created_at: datetime
-    chatflow_token: Optional[str] = None
+    updated_at: Optional[datetime] = None
+    chatflow_token_masked: Optional[str] = None
     chatflow_instance_id: Optional[str] = None
 
     class Config:

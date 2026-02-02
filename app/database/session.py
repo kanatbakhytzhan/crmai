@@ -108,6 +108,16 @@ async def init_db():
                     print("[OK] SQLite: leads.phone_from_message uzhe est")
                 else:
                     print(f"[WARN] leads.phone_from_message SQLite: {type(e).__name__}: {e}")
+            try:
+                await conn.execute(text(
+                    "ALTER TABLE whatsapp_accounts ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+                ))
+                print("[OK] SQLite: kolonka whatsapp_accounts.updated_at dobavlena")
+            except Exception as e:
+                if "duplicate column" in str(e).lower():
+                    print("[OK] SQLite: whatsapp_accounts.updated_at uzhe est")
+                else:
+                    print(f"[WARN] whatsapp_accounts.updated_at SQLite: {type(e).__name__}: {e}")
         if "postgresql" in db_url:
             # tenant_id в leads (nullable)
             try:
@@ -200,6 +210,13 @@ async def init_db():
             except Exception as e:
                 if "does not exist" not in str(e).lower():
                     print(f"[WARN] whatsapp_accounts phone_number_id nullable: {type(e).__name__}: {e}")
+            try:
+                await conn.execute(text(
+                    "ALTER TABLE whatsapp_accounts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+                ))
+                print("[OK] Kolonka whatsapp_accounts.updated_at proverena/dobavlena")
+            except Exception as e:
+                print(f"[WARN] whatsapp_accounts.updated_at migration: {type(e).__name__}: {e}")
             # Явное CREATE TABLE IF NOT EXISTS для Render/Postgres (на случай если create_all не создал)
             try:
                 await conn.execute(text("""

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_db, get_current_admin
 from app.core.config import get_settings
 from app.database import crud
-from app.database.models import User, Lead
+from app.database.models import User, Lead, Tenant
 
 router = APIRouter()
 
@@ -86,11 +86,11 @@ async def diagnostics_smoke_test(
     current_user: User = Depends(get_current_admin),
 ):
     """
-    Smoke-test: создать тестовый комментарий к последнему лиду, прочитать комментарии, удалить тестовый.
+    Smoke-test: (1) комментарий к последнему лиду; (2) whatsapp binding для первого tenant.
     Возвращает ok: true если всё прошло, иначе ok: false и reason.
     Только для админов.
     """
-    # Найти любой лид (самый свежий)
+    # --- 1) Комментарий к лиду ---
     result = await db.execute(select(Lead).order_by(Lead.id.desc()).limit(1))
     lead = result.scalar_one_or_none()
     if not lead:
@@ -98,7 +98,6 @@ async def diagnostics_smoke_test(
 
     comment_id = None
     try:
-        # Создать тестовый комментарий
         comment = await crud.create_lead_comment(
             db,
             lead_id=lead.id,
@@ -106,14 +105,11 @@ async def diagnostics_smoke_test(
             text="[smoke-test] diagnostic check",
         )
         comment_id = comment.id
-        # Прочитать комментарии
         comments = await crud.get_lead_comments(db, lead_id=lead.id, limit=10)
         if not any(c.id == comment_id for c in comments):
             await crud.delete_lead_comment(db, comment_id)
             return {"ok": False, "reason": "comment_created_but_not_found_in_list"}
-        # Удалить тестовый комментарий
         await crud.delete_lead_comment(db, comment_id)
-        return {"ok": True}
     except Exception as e:
         if comment_id:
             try:
@@ -122,6 +118,32 @@ async def diagnostics_smoke_test(
                 pass
         return {
             "ok": False,
-            "reason": f"{type(e).__name__}: {str(e)[:200]}",
+            "reason": f"comment: {type(e).__name__}: {str(e)[:200]}",
             "created_test_comment_id": comment_id,
+        }
+
+    # --- 2) WhatsApp binding: upsert для первого tenant, затем list ---
+    tenants = await crud.list_tenants(db)
+    if not tenants:
+        return {"ok": True}
+    tenant_id = tenants[0].id
+    try:
+        acc = await crud.upsert_whatsapp_for_tenant(
+            db,
+            tenant_id=tenant_id,
+            phone_number="+smoke-test",
+            chatflow_token="smoke_token",
+            chatflow_instance_id="smoke_instance",
+            is_active=False,
+        )
+        accounts = await crud.list_whatsapp_accounts_by_tenant(db, tenant_id)
+        if not accounts:
+            return {"ok": False, "reason": "whatsapp_upsert_ok_but_list_empty"}
+        if accounts[0].id != acc.id:
+            return {"ok": False, "reason": "whatsapp_list_first_id_mismatch"}
+        return {"ok": True}
+    except Exception as e:
+        return {
+            "ok": False,
+            "reason": f"whatsapp: {type(e).__name__}: {str(e)[:200]}",
         }

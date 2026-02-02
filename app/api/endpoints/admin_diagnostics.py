@@ -155,3 +155,44 @@ async def diagnostics_smoke_test(
         if not by_key or by_key.id != t.id:
             return {"ok": False, "reason": "tenant_by_webhook_key_mismatch"}
     return {"ok": True}
+
+
+@router.post("/diagnostics/fix-leads-tenant", response_model=dict)
+async def diagnostics_fix_leads_tenant(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin),
+):
+    """
+    Бэкофис: найти лиды с tenant_id IS NULL и попытаться проставить tenant_id.
+    Правила: (a) conversation по remote_jid (lead.bot_user.user_id);
+             (b) tenant где default_owner_user_id == lead.owner_id.
+    Идемпотентно. Только для админов (JWT admin).
+    Возвращает: { ok, fixed, skipped, skipped_ids, notes }.
+    """
+    result = await db.execute(select(Lead).where(Lead.tenant_id.is_(None)))
+    leads_without_tenant = list(result.scalars().all())
+    fixed = 0
+    skipped_ids: list[int] = []
+    notes: list[str] = []
+
+    for lead in leads_without_tenant:
+        resolved = await crud.resolve_lead_tenant_id(db, lead)
+        if resolved is not None:
+            lead.tenant_id = resolved
+            await db.commit()
+            await db.refresh(lead)
+            fixed += 1
+            notes.append(f"lead_id={lead.id} -> tenant_id={resolved}")
+        else:
+            skipped_ids.append(lead.id)
+            bot_user = await crud.get_bot_user_by_id(db, lead.bot_user_id)
+            remote_jid = (bot_user.user_id if bot_user else "") or ""
+            notes.append(f"lead_id={lead.id} skipped (no conversation/tenant), remote_jid={remote_jid!r}")
+
+    return {
+        "ok": True,
+        "fixed": fixed,
+        "skipped": len(skipped_ids),
+        "skipped_ids": skipped_ids,
+        "notes": notes,
+    }

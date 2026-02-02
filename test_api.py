@@ -151,6 +151,35 @@ def test_multi_tenancy():
                 print("    [OK] IZOLATSIYA RABOTAET! Company 2 ne vidit zayavki Company 1!")
 
 
+def test_fix_leads_tenant(admin_token: str):
+    """
+    POST /api/admin/diagnostics/fix-leads-tenant возвращает отчёт и не ломает данные.
+    Проверяет наличие полей: ok, fixed, skipped, skipped_ids, notes.
+    """
+    print("\n" + "=" * 60)
+    print("TEST: fix-leads-tenant (admin diagnostics)")
+    print("=" * 60)
+    headers = {"Authorization": f"Bearer {admin_token}"}
+    r = requests.post(f"{BASE_URL}/api/admin/diagnostics/fix-leads-tenant", headers=headers)
+    if r.status_code == 401:
+        print("[SKIP] Need admin JWT")
+        return
+    if r.status_code != 200:
+        print(f"[FAIL] fix-leads-tenant: {r.status_code} - {r.text}")
+        return
+    data = r.json()
+    for key in ("ok", "fixed", "skipped", "skipped_ids", "notes"):
+        if key not in data:
+            print(f"[FAIL] Missing key in response: {key}")
+            return
+    assert data["ok"] is True
+    assert isinstance(data["fixed"], int) and data["fixed"] >= 0
+    assert isinstance(data["skipped"], int) and data["skipped"] >= 0
+    assert isinstance(data["skipped_ids"], list)
+    assert isinstance(data["notes"], list)
+    print(f"[OK] fix-leads-tenant: fixed={data['fixed']}, skipped={data['skipped']}")
+
+
 def test_tenant_users_smoke(admin_token: str):
     """
     Smoke-check: добавить пользователя в tenant через POST, затем GET должен его вернуть.
@@ -214,6 +243,9 @@ if __name__ == "__main__":
 
         # 4. Tenant users smoke (POST add → GET list; нужен admin)
         test_tenant_users_smoke(token)
+
+        # 5. fix-leads-tenant (admin diagnostics; нужен admin)
+        test_fix_leads_tenant(token)
     
     print("\n" + "=" * 60)
     print("TESTIROVANIE ZAVERSHENO!")

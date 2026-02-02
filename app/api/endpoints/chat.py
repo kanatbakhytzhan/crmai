@@ -439,10 +439,25 @@ async def post_lead_ai_mute(
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
     tenant_id = getattr(lead, "tenant_id", None)
-    if tenant_id is None:
-        raise HTTPException(status_code=400, detail="Lead has no tenant_id (cannot set per-chat mute)")
     bot_user = await crud.get_bot_user_by_id(db, lead.bot_user_id)
     remote_jid = (bot_user.user_id if bot_user else "") or ""
+    if tenant_id is None:
+        resolved = await crud.resolve_lead_tenant_id(db, lead)
+        if resolved is not None:
+            lead.tenant_id = resolved
+            await db.commit()
+            await db.refresh(lead)
+            tenant_id = resolved
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "detail": "Lead has no tenant_id",
+                    "hint": "Run admin fix-leads-tenant or re-create lead through tenant-bound webhook",
+                    "lead_id": lead_id,
+                    "remoteJid": remote_jid or None,
+                },
+            )
     if not remote_jid:
         raise HTTPException(status_code=400, detail="Lead has no remote_jid (bot_user.user_id)")
     await crud.set_chat_ai_state(db, tenant_id, remote_jid, enabled=not body.muted)

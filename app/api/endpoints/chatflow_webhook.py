@@ -378,6 +378,7 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
                     active_lead = await crud.create_lead(
                         db=db, owner_id=owner_id, bot_user_id=bot_user.id,
                         name="Клиент", phone=normalized_in_message, summary="Номер из чата", language="ru",
+                        tenant_id=tenant_id,
                     )
                     await crud.update_lead_phone(
                         db, active_lead.id, normalized_in_message, phone_from_message=normalized_in_message
@@ -489,6 +490,7 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
                         city=city,
                         object_type=object_type,
                         area=area,
+                        tenant_id=tenant_id,
                     )
                     log.info("[CHATFLOW] lead created lead_id=%s", active_lead.id)
                 if language == "kk":

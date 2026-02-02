@@ -195,9 +195,10 @@ async def create_lead(
     language: str,
     city: str = "",
     object_type: str = "",
-    area: str = ""
+    area: str = "",
+    tenant_id: Optional[int] = None,
 ) -> Lead:
-    """Создать новую заявку (лид)"""
+    """Создать новую заявку (лид). tenant_id опционален (multi-tenant)."""
     lead = Lead(
         owner_id=owner_id,
         bot_user_id=bot_user_id,
@@ -208,7 +209,8 @@ async def create_lead(
         area=area,
         summary=summary,
         language=language,
-        status=LeadStatus.NEW
+        status=LeadStatus.NEW,
+        tenant_id=tenant_id,
     )
     db.add(lead)
     await db.commit()
@@ -384,6 +386,37 @@ async def delete_lead(
         await db.commit()
         return True
     return False
+
+
+async def resolve_lead_tenant_id(db: AsyncSession, lead: Lead) -> Optional[int]:
+    """
+    Попытаться определить tenant_id для лида (если отсутствует).
+    Порядок: (a) conversation по remote_jid (lead.bot_user.user_id);
+             (b) tenant где default_owner_user_id == lead.owner_id.
+    Лёгкие запросы, без тяжёлых операций.
+    """
+    # (a) remote_jid из bot_user
+    bot_user = await get_bot_user_by_id(db, lead.bot_user_id)
+    remote_jid = (bot_user.user_id if bot_user else "") or ""
+    if (remote_jid or "").strip():
+        result = await db.execute(
+            select(Conversation)
+            .where(Conversation.external_id == remote_jid.strip())
+            .where(Conversation.tenant_id.isnot(None))
+            .order_by(Conversation.id.desc())
+            .limit(1)
+        )
+        conv = result.scalar_one_or_none()
+        if conv and conv.tenant_id:
+            return conv.tenant_id
+    # (b) tenant по default_owner_user_id
+    result = await db.execute(
+        select(Tenant).where(Tenant.default_owner_user_id == lead.owner_id).limit(1)
+    )
+    tenant = result.scalar_one_or_none()
+    if tenant:
+        return tenant.id
+    return None
 
 
 # ========== LEAD COMMENTS ==========

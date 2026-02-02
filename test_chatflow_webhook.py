@@ -5,6 +5,7 @@ Per-chat pause: таблица conversations, колонка ai_paused (толь
 Запуск: python test_chatflow_webhook.py
        или: python -m pytest test_chatflow_webhook.py -v
 """
+import inspect
 from app.api.endpoints.chatflow_webhook import (
     parse_incoming_payload,
     _parse_mute_command,
@@ -145,6 +146,15 @@ def test_per_chat_isolation_doc():
     assert _is_start_command("/start") is True
 
 
+def test_create_lead_accepts_tenant_id():
+    """Lead created from webhook получает tenant_id: crud.create_lead принимает tenant_id."""
+    from app.database import crud
+    sig = inspect.signature(crud.create_lead)
+    assert "tenant_id" in sig.parameters
+    param = sig.parameters["tenant_id"]
+    assert param.default is None or param.default == inspect.Parameter.empty
+
+
 if __name__ == "__main__":
     test_parse_text_payload()
     test_parse_voice_payload()
@@ -159,4 +169,5 @@ if __name__ == "__main__":
     test_is_stop_command_robust()
     test_is_start_command_robust()
     test_per_chat_isolation_doc()
+    test_create_lead_accepts_tenant_id()
     print("All parse payload and mute command tests passed.")

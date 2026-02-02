@@ -504,19 +504,35 @@ async def get_or_create_conversation(
     return conv
 
 
+async def get_conversation_message_by_external_id(
+    db: AsyncSession, external_message_id: str
+) -> Optional[ConversationMessage]:
+    """Найти сообщение по external_message_id (для дедупликации ChatFlow)."""
+    if not (external_message_id or "").strip():
+        return None
+    result = await db.execute(
+        select(ConversationMessage).where(
+            ConversationMessage.external_message_id == external_message_id.strip()
+        )
+    )
+    return result.scalar_one_or_none()
+
+
 async def add_conversation_message(
     db: AsyncSession,
     conversation_id: int,
     role: str,
     text: str,
     raw_json: Optional[dict] = None,
+    external_message_id: Optional[str] = None,
 ) -> ConversationMessage:
-    """Добавить сообщение в conversation."""
+    """Добавить сообщение в conversation (external_message_id для дедупа входящих)."""
     msg = ConversationMessage(
         conversation_id=conversation_id,
         role=role,
         text=text or "",
         raw_json=raw_json,
+        external_message_id=(external_message_id or "").strip() or None,
     )
     db.add(msg)
     await db.commit()

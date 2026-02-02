@@ -83,8 +83,18 @@ async def init_db():
                 print("[OK] Kolonka tenants.default_owner_user_id proverena/dobavlena")
             except Exception as e:
                 print(f"[WARN] tenants.default_owner_user_id migration: {type(e).__name__}: {e}")
-            # conversations / conversation_messages created via Base.metadata.create_all above
-            # (models must be imported in main.py). No ALTER needed for new tables.
+            # conversation_messages.external_message_id (дедупликация ChatFlow)
+            try:
+                await conn.execute(text(
+                    "ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS external_message_id VARCHAR(255)"
+                ))
+                await conn.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_conversation_messages_external_message_id "
+                    "ON conversation_messages(external_message_id) WHERE external_message_id IS NOT NULL"
+                ))
+                print("[OK] Kolonka conversation_messages.external_message_id proverena/dobavlena")
+            except Exception as e:
+                print(f"[WARN] external_message_id migration: {type(e).__name__}: {e}")
     print("[OK] Baza dannyh initializirovana")
 
 

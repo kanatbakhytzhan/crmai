@@ -66,6 +66,7 @@ class ConversationMessage(Base):
     role = Column(String, nullable=False)  # "user" | "assistant" | "system"
     text = Column(Text, nullable=False)
     raw_json = Column(JSON, nullable=True)
+    external_message_id = Column(String(255), unique=True, index=True, nullable=True)  # для дедупликации (ChatFlow messageId)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     conversation = relationship("Conversation", back_populates="messages")

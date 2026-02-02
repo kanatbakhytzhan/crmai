@@ -158,10 +158,10 @@ FUNCTION_REGISTER_LEAD = {
 async def transcribe_audio(audio_file_path: str) -> str:
     """
     Транскрибировать аудио в текст через Whisper
-    
+
     Args:
         audio_file_path: Путь к аудио файлу
-        
+
     Returns:
         Распознанный текст
     """
@@ -190,23 +190,48 @@ async def transcribe_audio(audio_file_path: str) -> str:
             raise Exception("Oshibka raspoznavaniya audio")
 
 
+async def transcribe_audio_from_bytes(audio_bytes: bytes, suffix: str = ".ogg") -> str:
+    """
+    Транскрибировать аудио из bytes (для ChatFlow voice: base64 или скачанный по url).
+    Пишет во временный файл, вызывает transcribe_audio, удаляет файл.
+    """
+    import tempfile
+    import os
+    path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as f:
+            f.write(audio_bytes)
+            path = f.name
+        return await transcribe_audio(path)
+    finally:
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
 async def chat_with_gpt(
     messages: List[Dict[str, str]],
-    use_functions: bool = True
+    use_functions: bool = True,
+    extra_system_content: Optional[str] = None,
 ) -> Tuple[str, Optional[Dict]]:
     """
-    Отправить сообщения в GPT-4o и получить ответ
-    
+    Отправить сообщения в GPT-4o и получить ответ.
+
     Args:
         messages: История сообщений в формате OpenAI
         use_functions: Использовать ли Function Calling
-        
+        extra_system_content: Дополнительный текст к system (например: не повторять приветствия при контексте)
+
     Returns:
         Tuple: (текст ответа, данные function_call если есть)
     """
     try:
-        # Добавляем системный промпт в начало
-        full_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
+        system_content = SYSTEM_PROMPT
+        if extra_system_content and extra_system_content.strip():
+            system_content = system_content + "\n\n" + extra_system_content.strip()
+        full_messages = [{"role": "system", "content": system_content}] + messages
         
         print(f"[GPT] Otpravka {len(full_messages)} soobshcheniy")
         

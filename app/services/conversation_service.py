@@ -33,14 +33,25 @@ async def get_or_create_conversation(
     )
 
 
+async def get_message_by_external_id(
+    db: AsyncSession, external_message_id: str
+):
+    """Get conversation message by external id (for dedup). Returns message or None."""
+    return await crud.get_conversation_message_by_external_id(db, external_message_id)
+
+
 async def append_user_message(
     db: AsyncSession,
     conversation_id: int,
     text: str,
     raw_json: Optional[dict] = None,
+    external_message_id: Optional[str] = None,
 ):
-    """Append a user message to the conversation."""
-    await crud.add_conversation_message(db, conversation_id, "user", text or "", raw_json=raw_json)
+    """Append a user message to the conversation (external_message_id for dedup)."""
+    await crud.add_conversation_message(
+        db, conversation_id, "user", text or "", raw_json=raw_json,
+        external_message_id=external_message_id,
+    )
 
 
 async def append_assistant_message(

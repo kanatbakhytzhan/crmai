@@ -2,21 +2,18 @@
 ChatFlow webhook: GET/POST /api/chatflow/webhook, GET /api/chatflow/ping.
 
 Логика:
-- Контекст по remoteJid (conversation_messages, channel=chatflow), без повторного приветствия.
-- Текст: data["message"]; голосовые: mediaData.url или mediaData.base64 → Whisper → текст.
-- Ответы только из backend через ChatFlow API send-text (не через Flow "Text message").
-- Дедупликация по messageId (external_message_id в conversation_messages).
+- Единый ключ диалога — ТОЛЬКО data["metadata"]["remoteJid"] (jid). Номер из текста НЕ создаёт нового диалога.
+- Контекст по jid (conversation_messages, channel=chatflow). Приветствие только при первой реплике (нет assistant в истории).
+- Номер телефона берётся из jid (phone = jid.split("@")[0]). Бот НЕ просит номер — он уже известен.
+- Если пользователь прислал номер текстом — распознаём, сохраняем в текущий lead.phone, продолжаем без повторного приветствия.
+- Один активный lead на jid (NEW/IN_PROGRESS). Дедупликация по messageId.
 
-ENV: CHATFLOW_TOKEN, CHATFLOW_INSTANCE_ID, OPENAI_API_KEY (токены не в коде).
-
-Ручная проверка (curl):
-  curl -X POST http://localhost:8000/api/chatflow/webhook \\
-    -H "Content-Type: application/json" \\
-    -d '{"messageType":"text","message":"Салем","metadata":{"remoteJid":"77768776637@s.whatsapp.net","messageId":"ABC123","timestamp":1769970129}}'
+ENV: CHATFLOW_TOKEN, CHATFLOW_INSTANCE_ID, OPENAI_API_KEY.
 """
 import base64
 import json
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -24,6 +21,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
+from app.database import crud
 from app.services import chatflow_client, conversation_service, openai_service
 
 router = APIRouter()
@@ -34,10 +32,50 @@ VOICE_TYPES = ("audio", "voice", "ptt", "voice_note")
 MEDIA_DOWNLOAD_TIMEOUT = 25.0
 MEDIA_DOWNLOAD_RETRIES = 2
 
-# Дополнение к system prompt при наличии истории: не повторять приветствия
+# Номер из jid — бот не просит номер
+CHATFLOW_PHONE_CONTEXT = (
+    "Контекст WhatsApp: номер телефона клиента уже известен — {phone}. "
+    "НЕ проси номер и НЕ говори «дайте номер» / «на какой номер перезвонить». "
+    "Спроси только имя если нужна заявка. Используй этот номер для заявки."
+)
+# При наличии истории — не повторять приветствие
 EXTRA_SYSTEM_CONTEXT = (
     "Если в истории уже есть сообщения, не повторяй приветствие — отвечай по сути последнего сообщения."
 )
+
+PHONE_REGEX = re.compile(r"^\+?[\d\s\-()]{10,15}$")
+
+
+def _normalize_phone(text: str) -> str | None:
+    r"""Распознать номер из текста (+?\d{10,15}). Вернуть нормализованный (+77...) или None."""
+    if not text or not text.strip():
+        return None
+    s = text.strip()
+    if not PHONE_REGEX.match(s):
+        return None
+    digits = re.sub(r"\D", "", s)
+    if len(digits) < 10:
+        return None
+    if digits.startswith("8") and len(digits) == 11:
+        digits = "7" + digits[1:]
+    if digits.startswith("7") and len(digits) == 11:
+        return "+" + digits
+    if len(digits) >= 10:
+        return "+" + digits
+    return None
+
+
+async def _get_default_owner_id(db: AsyncSession) -> int | None:
+    """Владелец лидов для ChatFlow (default_owner_email или первый пользователь)."""
+    from app.core.config import get_settings
+    settings = get_settings()
+    default_email = getattr(settings, "default_owner_email", None)
+    if default_email:
+        user = await crud.get_user_by_email(db, email=default_email)
+        if user:
+            return user.id
+    user = await crud.get_first_user(db)
+    return user.id if user else None
 
 
 def parse_incoming_payload(data: dict[str, Any] | None) -> tuple[str, str, str, str]:
@@ -225,21 +263,97 @@ async def chatflow_webhook_post(request: Request, db: AsyncSession = Depends(get
         log.error("[CHATFLOW] append_user_message error: %s", type(e).__name__, exc_info=True)
         return {"ok": True}
 
+    # Если пользователь прислал номер текстом — сохранить в текущий lead.phone (не новый диалог)
+    phone_from_jid = remote_jid.split("@")[0] if "@" in remote_jid else remote_jid
+    normalized_in_message = _normalize_phone(user_text)
+    if normalized_in_message:
+        try:
+            owner_id = await _get_default_owner_id(db)
+            if owner_id:
+                bot_user = await crud.get_or_create_bot_user(db, user_id=remote_jid, owner_id=owner_id)
+                active_lead = await crud.get_active_lead_by_bot_user(db, bot_user.id)
+                if active_lead and (not active_lead.phone or active_lead.phone != normalized_in_message):
+                    await crud.update_lead_phone(db, active_lead.id, normalized_in_message)
+                    log.info("[CHATFLOW] lead phone updated lead_id=%s phone=%s", active_lead.id, normalized_in_message)
+        except Exception as e:
+            log.warning("[CHATFLOW] update lead phone: %s", type(e).__name__)
+
     messages_for_gpt = await conversation_service.build_context_messages(db, conv.id, limit=CONTEXT_LIMIT)
     log.info("[CHATFLOW] messages loaded count=%s", len(messages_for_gpt))
 
-    # Дополнение к system: не повторять приветствия при наличии контекста
-    extra_system = EXTRA_SYSTEM_CONTEXT if len(messages_for_gpt) > 1 else None
+    # System: номер из jid (не проси номер) + при наличии истории не повторять приветствие
+    extra_system = CHATFLOW_PHONE_CONTEXT.format(phone=phone_from_jid)
+    if len(messages_for_gpt) > 1:
+        extra_system += "\n\n" + EXTRA_SYSTEM_CONTEXT
 
+    response_text = ""
+    function_call = None
     try:
-        response_text, _ = await openai_service.chat_with_gpt(
+        response_text, function_call = await openai_service.chat_with_gpt(
             messages_for_gpt, use_functions=True, extra_system_content=extra_system
         )
-        reply = (response_text or "").strip() or "Чем могу помочь?"
-        log.info("[CHATFLOW] openai ok reply_len=%s", len(reply))
+        log.info("[CHATFLOW] openai ok reply_len=%s function_call=%s", len(response_text or ""), bool(function_call))
     except Exception as e:
         log.error("[CHATFLOW] OpenAI error: %s", type(e).__name__, exc_info=True)
-        reply = "Чем могу помочь?"
+
+    reply = (response_text or "").strip() or "Чем могу помочь?"
+
+    # Обработка register_lead: один активный lead на jid, телефон из jid
+    if function_call and function_call.get("name") == "register_lead":
+        args = function_call.get("arguments") or {}
+        # Телефон всегда из jid для ChatFlow
+        phone_for_lead = phone_from_jid
+        if isinstance(args.get("phone"), str) and args["phone"].strip():
+            phone_for_lead = args["phone"].strip()
+        else:
+            args = dict(args)
+            args["phone"] = phone_for_lead
+        try:
+            owner_id = await _get_default_owner_id(db)
+            if owner_id:
+                bot_user = await crud.get_or_create_bot_user(db, user_id=remote_jid, owner_id=owner_id)
+                active_lead = await crud.get_active_lead_by_bot_user(db, bot_user.id)
+                name = (args.get("name") or "").strip() or "Клиент"
+                language = (args.get("language") or "ru").strip() or "ru"
+                summary = (args.get("summary") or "").strip() or "Заявка из WhatsApp"
+                city = (args.get("city") or "").strip()
+                object_type = (args.get("object_type") or "").strip()
+                area = (args.get("area") or "").strip()
+                if active_lead:
+                    # Обновить существующий лид (не создавать новый)
+                    active_lead.name = name
+                    active_lead.phone = phone_for_lead
+                    active_lead.summary = summary or active_lead.summary
+                    if city:
+                        active_lead.city = city
+                    if object_type:
+                        active_lead.object_type = object_type
+                    if area:
+                        active_lead.area = area
+                    active_lead.language = language
+                    await db.commit()
+                    await db.refresh(active_lead)
+                    log.info("[CHATFLOW] lead updated lead_id=%s", active_lead.id)
+                else:
+                    active_lead = await crud.create_lead(
+                        db=db,
+                        owner_id=owner_id,
+                        bot_user_id=bot_user.id,
+                        name=name,
+                        phone=phone_for_lead,
+                        summary=summary,
+                        language=language,
+                        city=city,
+                        object_type=object_type,
+                        area=area,
+                    )
+                    log.info("[CHATFLOW] lead created lead_id=%s", active_lead.id)
+                if language == "kk":
+                    reply = f"Рақмет, {name}! Сіздің өтінішіңіз қабылданды. Біздің менеджер жақын арада {phone_for_lead} нөміріне хабарласады."
+                else:
+                    reply = f"Спасибо, {name}! Наш менеджер свяжется с вами по номеру {phone_for_lead} в ближайшее время."
+        except Exception as e:
+            log.error("[CHATFLOW] register_lead error: %s", type(e).__name__, exc_info=True)
 
     try:
         await conversation_service.append_assistant_message(db, conv.id, reply)

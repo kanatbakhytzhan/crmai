@@ -300,6 +300,31 @@ async def has_recent_lead(db: AsyncSession, bot_user_id: int, minutes: int = 5) 
     return lead is not None
 
 
+async def get_active_lead_by_bot_user(db: AsyncSession, bot_user_id: int) -> Optional[Lead]:
+    """Один активный лид на клиента (NEW или IN_PROGRESS). Для ChatFlow — один lead на jid."""
+    result = await db.execute(
+        select(Lead)
+        .where(
+            Lead.bot_user_id == bot_user_id,
+            Lead.status.in_([LeadStatus.NEW, LeadStatus.IN_PROGRESS]),
+        )
+        .order_by(Lead.id.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def update_lead_phone(db: AsyncSession, lead_id: int, phone: str) -> Optional[Lead]:
+    """Обновить телефон лида (для ChatFlow: номер из текста сообщения)."""
+    result = await db.execute(select(Lead).where(Lead.id == lead_id))
+    lead = result.scalar_one_or_none()
+    if lead and (phone or "").strip():
+        lead.phone = (phone or "").strip()
+        await db.commit()
+        await db.refresh(lead)
+    return lead
+
+
 async def delete_lead(
     db: AsyncSession,
     lead_id: int,

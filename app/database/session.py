@@ -95,6 +95,51 @@ async def init_db():
                 print("[OK] Kolonka conversation_messages.external_message_id proverena/dobavlena")
             except Exception as e:
                 print(f"[WARN] external_message_id migration: {type(e).__name__}: {e}")
+            # tenants.ai_prompt (кастомный промпт для AI по tenant)
+            try:
+                await conn.execute(text(
+                    "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS ai_prompt TEXT"
+                ))
+                print("[OK] Kolonka tenants.ai_prompt proverena/dobavlena")
+            except Exception as e:
+                print(f"[WARN] tenants.ai_prompt migration: {type(e).__name__}: {e}")
+            # Явное CREATE TABLE IF NOT EXISTS для Render/Postgres (на случай если create_all не создал)
+            try:
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS lead_comments (
+                        id SERIAL PRIMARY KEY,
+                        lead_id INTEGER NOT NULL REFERENCES leads(id),
+                        user_id INTEGER NOT NULL REFERENCES users(id),
+                        text TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_lead_comments_lead_id ON lead_comments(lead_id)"
+                ))
+                print("[OK] Tablica lead_comments proverena/sozdana")
+            except Exception as e:
+                print(f"[WARN] lead_comments create: {type(e).__name__}: {e}")
+            try:
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS tenant_users (
+                        id SERIAL PRIMARY KEY,
+                        tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                        user_id INTEGER NOT NULL REFERENCES users(id),
+                        role VARCHAR(50) DEFAULT 'member',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(tenant_id, user_id)
+                    )
+                """))
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_tenant_users_tenant_id ON tenant_users(tenant_id)"
+                ))
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_tenant_users_user_id ON tenant_users(user_id)"
+                ))
+                print("[OK] Tablica tenant_users proverena/sozdana")
+            except Exception as e:
+                print(f"[WARN] tenant_users create: {type(e).__name__}: {e}")
     print("[OK] Baza dannyh initializirovana")
 
 

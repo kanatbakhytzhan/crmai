@@ -16,13 +16,13 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.database.session import init_db, drop_all_tables, engine, sync_engine, Base
-from app.api.endpoints import chat, auth, admin_users, admin_tenants, whatsapp_webhook, chatflow_webhook
+from app.api.endpoints import chat, auth, admin_users, admin_tenants, admin_diagnostics, whatsapp_webhook, chatflow_webhook
 from app.services.telegram_service import stop_bot
 from app.admin import setup_admin
 
 # ВАЖНО: Импортируем модели, чтобы SQLAlchemy их зарегистрировал в Base.metadata
 # Без этого импорта таблицы не будут созданы!
-from app.database.models import User, BotUser, Message, Lead, Tenant, WhatsAppAccount, Conversation, ConversationMessage
+from app.database.models import User, BotUser, Message, Lead, LeadComment, Tenant, TenantUser, WhatsAppAccount, Conversation, ConversationMessage
 from app.api.deps import get_db
 from app.api.endpoints import auth as auth_endpoints
 from app.schemas.auth import Token
@@ -157,6 +157,7 @@ app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
 app.include_router(chat.router, prefix="/api", tags=["Chat"])
 app.include_router(admin_users.router, prefix="/api/admin", tags=["Admin Users"])
 app.include_router(admin_tenants.router, prefix="/api/admin", tags=["Admin Tenants"])
+app.include_router(admin_diagnostics.router, prefix="/api/admin", tags=["Admin Diagnostics"])
 app.include_router(whatsapp_webhook.router, prefix="/api/whatsapp", tags=["WhatsApp Webhook"])
 app.include_router(chatflow_webhook.router, prefix="/api/chatflow", tags=["ChatFlow Webhook"])
 

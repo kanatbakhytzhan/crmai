@@ -226,7 +226,10 @@ async def webhook_post(
                 messages_for_gpt = await conversation_service.build_context_messages(db, conv.id, limit=20)
                 log.info(f"[WA][CHAT] loaded {len(messages_for_gpt)} context messages")
 
+                # tenant.ai_prompt из БД (не из старого объекта)
+                tenant = await crud.get_tenant_by_id(db, tenant_id)
                 ai_prompt_override = (getattr(tenant, "ai_prompt", None) or "").strip() or None
+                log.info("[GPT] tenant_id=%s use_tenant_prompt=%s prompt_len=%s", tenant_id, bool(ai_prompt_override), len(ai_prompt_override or ""))
 
                 assistant_reply = ""
                 try:

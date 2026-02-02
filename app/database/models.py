@@ -157,6 +157,21 @@ class Message(Base):
     bot_user = relationship("BotUser", back_populates="messages")
 
 
+class ChatAIState(Base):
+    """
+    Включён ли AI в этом чате (remoteJid). /stop и /start меняют только эту таблицу.
+    UNIQUE(tenant_id, remote_jid). Критерий один: входящий remoteJid (не sender).
+    """
+    __tablename__ = "chat_ai_states"
+    __table_args__ = (UniqueConstraint("tenant_id", "remote_jid", name="uq_chat_ai_states_tenant_remote_jid"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    remote_jid = Column(String(255), nullable=False, index=True)
+    is_enabled = Column(Boolean, default=True, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class Lead(Base):
     """Модель лида (заявки)"""
     __tablename__ = "leads"
@@ -168,6 +183,7 @@ class Lead(Base):
     
     name = Column(String, nullable=False)
     phone = Column(String, nullable=False)
+    phone_from_message = Column(String(32), nullable=True)  # последний номер, присланный текстом в чате
     city = Column(String, nullable=True)
     object_type = Column(String, nullable=True)
     area = Column(String, nullable=True)

@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 
 from app.database.models import (
     User, BotUser, Message, Lead, LeadStatus, LeadComment, Tenant, TenantUser, WhatsAppAccount,
-    Conversation, ConversationMessage, ChatMute,
+    Conversation, ConversationMessage, ChatMute, ChatAIState,
 )
 from app.core.security import get_password_hash
 
@@ -341,12 +341,14 @@ async def get_active_lead_by_bot_user(db: AsyncSession, bot_user_id: int) -> Opt
     return result.scalar_one_or_none()
 
 
-async def update_lead_phone(db: AsyncSession, lead_id: int, phone: str) -> Optional[Lead]:
-    """Обновить телефон лида (для ChatFlow: номер из текста сообщения)."""
+async def update_lead_phone(db: AsyncSession, lead_id: int, phone: str, phone_from_message: Optional[str] = None) -> Optional[Lead]:
+    """Обновить телефон лида (для ChatFlow: номер из текста сообщения). Опционально сохранить phone_from_message."""
     result = await db.execute(select(Lead).where(Lead.id == lead_id))
     lead = result.scalar_one_or_none()
     if lead and (phone or "").strip():
         lead.phone = (phone or "").strip()
+        if phone_from_message is not None and hasattr(lead, "phone_from_message"):
+            lead.phone_from_message = (phone_from_message or "").strip()[:32] or None
         await db.commit()
         await db.refresh(lead)
     return lead
@@ -691,6 +693,56 @@ async def delete_whatsapp_account(
     await db.delete(acc)
     await db.commit()
     return True
+
+
+async def get_active_chatflow_account_for_tenant(db: AsyncSession, tenant_id: int) -> Optional[WhatsAppAccount]:
+    """Есть ли у tenant активный WhatsApp attach с критичными полями (chatflow_token OR chatflow_instance_id)."""
+    result = await db.execute(
+        select(WhatsAppAccount)
+        .where(WhatsAppAccount.tenant_id == tenant_id)
+        .where(WhatsAppAccount.is_active == True)
+    )
+    for acc in result.scalars().all():
+        if (getattr(acc, "chatflow_token", None) or "").strip() or (getattr(acc, "chatflow_instance_id", None) or "").strip():
+            return acc
+    return None
+
+
+# ========== chat_ai_states (per-chat /stop /start по remoteJid) ==========
+
+async def get_chat_ai_state(db: AsyncSession, tenant_id: int, remote_jid: str) -> bool:
+    """AI включён в этом чате (tenant_id, remote_jid). Default True если записи нет."""
+    if not (remote_jid or "").strip():
+        return True
+    from app.database.models import ChatAIState
+    result = await db.execute(
+        select(ChatAIState)
+        .where(ChatAIState.tenant_id == tenant_id)
+        .where(ChatAIState.remote_jid == remote_jid.strip())
+    )
+    row = result.scalar_one_or_none()
+    return row.is_enabled if row else True
+
+
+async def set_chat_ai_state(db: AsyncSession, tenant_id: int, remote_jid: str, enabled: bool) -> None:
+    """Включить/выключить AI в чате (tenant_id, remote_jid). Upsert."""
+    jid = (remote_jid or "").strip()
+    if not jid:
+        return
+    result = await db.execute(
+        select(ChatAIState).where(ChatAIState.tenant_id == tenant_id).where(ChatAIState.remote_jid == jid)
+    )
+    row = result.scalar_one_or_none()
+    if row:
+        row.is_enabled = enabled
+        row.updated_at = datetime.utcnow()
+        await db.commit()
+        await db.refresh(row)
+    else:
+        row = ChatAIState(tenant_id=tenant_id, remote_jid=jid, is_enabled=enabled)
+        db.add(row)
+        await db.commit()
+        await db.refresh(row)
 
 
 # ========== WhatsApp conversation history (per tenant + wa_from) ==========

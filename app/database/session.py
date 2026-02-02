@@ -98,6 +98,16 @@ async def init_db():
                     print("[OK] SQLite: conversations.ai_paused uzhe est")
                 else:
                     print(f"[WARN] conversations.ai_paused SQLite: {type(e).__name__}: {e}")
+            try:
+                await conn.execute(text(
+                    "ALTER TABLE leads ADD COLUMN phone_from_message VARCHAR(32)"
+                ))
+                print("[OK] SQLite: kolonka leads.phone_from_message dobavlena")
+            except Exception as e:
+                if "duplicate column" in str(e).lower():
+                    print("[OK] SQLite: leads.phone_from_message uzhe est")
+                else:
+                    print(f"[WARN] leads.phone_from_message SQLite: {type(e).__name__}: {e}")
         if "postgresql" in db_url:
             # tenant_id в leads (nullable)
             try:
@@ -249,6 +259,32 @@ async def init_db():
                 print("[OK] Tablica chat_mutes proverena/sozdana")
             except Exception as e:
                 print(f"[WARN] chat_mutes create: {type(e).__name__}: {e}")
+            # chat_ai_states: per-chat /stop /start по remoteJid
+            try:
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS chat_ai_states (
+                        id SERIAL PRIMARY KEY,
+                        tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                        remote_jid VARCHAR(255) NOT NULL,
+                        is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(tenant_id, remote_jid)
+                    )
+                """))
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_chat_ai_states_tenant_jid ON chat_ai_states(tenant_id, remote_jid)"
+                ))
+                print("[OK] Tablica chat_ai_states proverena/sozdana")
+            except Exception as e:
+                print(f"[WARN] chat_ai_states create: {type(e).__name__}: {e}")
+            # leads.phone_from_message (номер, присланный текстом в чате)
+            try:
+                await conn.execute(text(
+                    "ALTER TABLE leads ADD COLUMN IF NOT EXISTS phone_from_message VARCHAR(32)"
+                ))
+                print("[OK] Kolonka leads.phone_from_message proverena/dobavlena")
+            except Exception as e:
+                print(f"[WARN] leads.phone_from_message migration: {type(e).__name__}: {e}")
     print("[OK] Baza dannyh initializirovana")
 
 

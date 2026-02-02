@@ -22,7 +22,7 @@ from app.admin import setup_admin
 
 # ВАЖНО: Импортируем модели, чтобы SQLAlchemy их зарегистрировал в Base.metadata
 # Без этого импорта таблицы не будут созданы!
-from app.database.models import User, BotUser, Message, Lead, LeadComment, Tenant, TenantUser, WhatsAppAccount, Conversation, ConversationMessage, ChatMute
+from app.database.models import User, BotUser, Message, Lead, LeadComment, Tenant, TenantUser, WhatsAppAccount, Conversation, ConversationMessage, ChatMute, ChatAIState
 from app.api.deps import get_db
 from app.api.endpoints import auth as auth_endpoints
 from app.schemas.auth import Token

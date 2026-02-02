@@ -136,14 +136,10 @@ async def _resolve_tenant_from_payload(db: AsyncSession, data: dict[str, Any]):
 
 
 async def _resolve_tenant(db: AsyncSession, data: dict[str, Any], resolved_tenant: Any = None):
-    """Tenant: переданный resolved_tenant, иначе по instance_id/client_id в payload, иначе первый активный (fallback)."""
+    """Tenant только по привязке: переданный resolved_tenant ИЛИ по instance_id/client_id в payload. Без fallback на первый tenant."""
     if resolved_tenant is not None:
         return resolved_tenant
-    tenant = await _resolve_tenant_from_payload(db, data)
-    if tenant:
-        return tenant
-    log.warning("[CHATFLOW] no instance_id/client_id in payload, using first active tenant as fallback")
-    return await _get_chatflow_tenant(db)
+    return await _resolve_tenant_from_payload(db, data)
 
 
 def parse_incoming_payload(data: dict[str, Any] | None) -> tuple[str, str, str, str]:
@@ -299,9 +295,18 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
     if not (user_text and user_text.strip()):
         return {"ok": True}
 
-    # Определить tenant: переданный resolved_tenant, иначе по instance_id/client_id в payload, иначе первый активный
+    # A) Tenant только по привязке (instance_id или webhook_key). Без fallback.
     tenant = await _resolve_tenant(db, data, resolved_tenant)
-    tenant_id = tenant.id if tenant else None
+    if not tenant:
+        log.warning("[AI] SKIP tenant not found for chatflow instance")
+        return {"ok": True}
+    tenant_id = tenant.id
+
+    # A) WhatsApp attach активен и заполнены критичные поля (token OR instance_id)
+    acc = await crud.get_active_chatflow_account_for_tenant(db, tenant_id)
+    if not acc:
+        log.warning("[AI] SKIP whatsapp not attached/inactive")
+        return {"ok": True}
 
     # Get or create conversation (channel=chatflow, external_id=remote_jid)
     try:
@@ -315,19 +320,15 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
     text_norm = _normalize_command_text(user_text or "")
     jid_safe = remote_jid[-4:] if len(remote_jid) >= 4 else "****"
 
-    # Команды /stop и /start — только этот чат (Conversation.ai_paused). Не сохраняем сообщение, не создаём лид.
+    # B) /stop и /start — только по remoteJid (chat_ai_states). Кто бы ни писал — один критерий: remoteJid.
     if _is_stop_command(text_norm):
-        conv.ai_paused = True
-        await db.commit()
-        await db.refresh(conv)
-        log.info("[AI] command stop detected jid=...%s conv_id=%s", jid_safe, conv.id)
+        await crud.set_chat_ai_state(db, tenant_id, remote_jid, False)
+        log.info("[AI] command stop jid=...%s tenant_id=%s", jid_safe, tenant_id)
         await _send_reply_and_return_ok(remote_jid, "Ок ✅ AI в этом чате выключен. Чтобы включить обратно — /start")
         return {"ok": True}
     if _is_start_command(text_norm):
-        conv.ai_paused = False
-        await db.commit()
-        await db.refresh(conv)
-        log.info("[AI] chat resumed jid=...%s conv_id=%s", jid_safe, conv.id)
+        await crud.set_chat_ai_state(db, tenant_id, remote_jid, True)
+        log.info("[AI] chat resumed jid=...%s tenant_id=%s", jid_safe, tenant_id)
         await _send_reply_and_return_ok(remote_jid, "Ок ✅ AI снова включён в этом чате.")
         return {"ok": True}
 
@@ -357,6 +358,41 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
 
     phone_from_jid = remote_jid.split("@")[0] if "@" in remote_jid else remote_jid
     normalized_in_message = _normalize_phone(user_text)
+
+    # C) Сообщение — только номер телефона (10–15 цифр, допустимы пробелы/+-/скобки): сохранить в lead, ответить один раз, НЕ сбрасывать контекст.
+    _phone_only_re = re.compile(r"^[\d\s\-+()]+$")
+    _stripped = (user_text or "").strip()
+    if normalized_in_message and _phone_only_re.match(_stripped) and len(re.sub(r"\D", "", _stripped)) >= 10:
+        try:
+            owner_id = await _get_default_owner_id(db)
+            if owner_id:
+                bot_user = await crud.get_or_create_bot_user(db, user_id=remote_jid, owner_id=owner_id)
+                active_lead = await crud.get_active_lead_by_bot_user(db, bot_user.id)
+                if active_lead:
+                    await crud.update_lead_phone(
+                        db, active_lead.id, normalized_in_message, phone_from_message=normalized_in_message
+                    )
+                    log.info("[CHATFLOW] lead phone from message lead_id=%s phone=%s", active_lead.id, normalized_in_message)
+                else:
+                    active_lead = await crud.create_lead(
+                        db=db, owner_id=owner_id, bot_user_id=bot_user.id,
+                        name="Клиент", phone=normalized_in_message, summary="Номер из чата", language="ru",
+                    )
+                    await crud.update_lead_phone(
+                        db, active_lead.id, normalized_in_message, phone_from_message=normalized_in_message
+                    )
+                    log.info("[CHATFLOW] lead created from phone message lead_id=%s", active_lead.id)
+        except Exception as e:
+            log.warning("[CHATFLOW] phone-from-message: %s", type(e).__name__)
+        reply_phone = "Спасибо! Номер записал ✅"
+        try:
+            await conversation_service.append_assistant_message(db, conv.id, reply_phone)
+        except Exception as e:
+            log.warning("[CHATFLOW] append_assistant_message: %s", type(e).__name__)
+        await _send_reply_and_return_ok(remote_jid, reply_phone)
+        return {"ok": True}
+
+    # Обычное обновление номера в лиде (если в тексте есть номер, но не только номер)
     if normalized_in_message:
         try:
             owner_id = await _get_default_owner_id(db)
@@ -369,19 +405,22 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
         except Exception as e:
             log.warning("[CHATFLOW] update lead phone: %s", type(e).__name__)
 
-    # AI отвечает только если tenant.ai_enabled и не conv.ai_paused
-    if tenant_id is None:
-        log.info("[AI] skipped reply tenant=None reason=no_tenant")
-        return {"ok": True}
+    # AI отвечает только если tenant.ai_enabled и chat_ai_state для этого чата (remoteJid) включён
     if not ai_enabled:
         log.info("[AI] skipped reply tenant=%s reason=tenant_disabled", tenant_id)
         return {"ok": True}
-    if getattr(conv, "ai_paused", False):
-        log.info("[AI] chat paused => skipping reply jid=...%s conv_id=%s", jid_safe, conv.id)
+    chat_ai_enabled = await crud.get_chat_ai_state(db, tenant_id, remote_jid)
+    if not chat_ai_enabled:
+        log.info("[AI] chat paused (chat_ai_state) jid=...%s tenant_id=%s", jid_safe, tenant_id)
         return {"ok": True}
 
     messages_for_gpt = await conversation_service.build_context_messages(db, conv.id, limit=CONTEXT_LIMIT)
     log.info("[CHATFLOW] messages loaded count=%s", len(messages_for_gpt))
+
+    # D) tenant.ai_prompt из БД (не из старого объекта)
+    tenant = await crud.get_tenant_by_id(db, tenant_id)
+    system_override = (getattr(tenant, "ai_prompt", None) or "").strip() or None
+    log.info("[GPT] tenant_id=%s use_tenant_prompt=%s prompt_len=%s", tenant_id, bool(system_override), len(system_override or ""))
 
     # System: номер из jid (не проси номер) + при наличии истории не повторять приветствие
     extra_system = CHATFLOW_PHONE_CONTEXT.format(phone=phone_from_jid)
@@ -392,7 +431,7 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
     function_call = None
     try:
         response_text, function_call = await openai_service.chat_with_gpt(
-            messages_for_gpt, use_functions=True, extra_system_content=extra_system
+            messages_for_gpt, use_functions=True, extra_system_content=extra_system, system_override=system_override
         )
         log.info("[CHATFLOW] openai ok reply_len=%s function_call=%s", len(response_text or ""), bool(function_call))
     except Exception as e:

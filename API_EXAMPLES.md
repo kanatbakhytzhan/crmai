@@ -320,6 +320,103 @@ GET  /api/leads        # Получение заявок
 
 ---
 
+## 👥 Tenant users (Admin)
+
+Привязка пользователей к tenant. Требуется JWT админа.
+
+### GET /api/admin/tenants/{tenant_id}/users
+
+Список пользователей tenant.
+
+**Response 200:**
+```json
+{
+  "users": [
+    {
+      "id": 1,
+      "user_id": 2,
+      "email": "manager@company.kz",
+      "company_name": "Company",
+      "role": "manager",
+      "created_at": "2026-01-28T12:00:00"
+    }
+  ],
+  "total": 1
+}
+```
+
+### POST /api/admin/tenants/{tenant_id}/users
+
+Добавить пользователя к tenant по email и роли.
+
+**Body:**
+```json
+{
+  "email": "user@mail.com",
+  "role": "manager"
+}
+```
+`role`: `"manager"` | `"admin"` | `"member"` (по умолчанию `member`).
+
+**Response 201:** объект добавленного пользователя (id, user_id, email, company_name, role, created_at).
+
+**Ошибки:** 404 `Tenant not found`, 404 `user_not_found` (пользователь с таким email не найден).
+
+### DELETE /api/admin/tenants/{tenant_id}/users/{user_id}
+
+Удалить пользователя из tenant.
+
+**Response 200:** `{"ok": true}`. Ошибки: 404.
+
+---
+
+## 📱 WhatsApp (ChatFlow) привязка к tenant
+
+### POST /api/admin/tenants/{tenant_id}/whatsapp
+
+Привязать WhatsApp/ChatFlow к tenant.
+
+**Body:**
+```json
+{
+  "phone_number": "+77001234567",
+  "phone_number_id": "123456789",
+  "chatflow_token": "your_chatflow_token",
+  "chatflow_instance_id": "instance_abc"
+}
+```
+- `phone_number`, `phone_number_id` — для Meta Cloud API (опционально).
+- `chatflow_token`, `chatflow_instance_id` — для ChatFlow; по `chatflow_instance_id` webhook определяет tenant.
+
+**Response 201:** объект WhatsApp-аккаунта (id, tenant_id, phone_number, chatflow_token, chatflow_instance_id, is_active, …).
+
+### GET /api/admin/tenants/{tenant_id}/whatsapp
+
+Список привязанных WhatsApp-номеров tenant.
+
+**Response 200:** `{"accounts": [...], "total": N}`.
+
+### Webhook с привязкой по tenant
+
+- **POST /api/chatflow/webhook** — tenant по `instance_id`/`client_id` в payload (whatsapp_accounts.chatflow_instance_id) или fallback на первый активный tenant.
+- **POST /api/chatflow/webhook/{tenant_key}** — tenant по полю `webhook_key` в таблице tenants (UUID). Удобно, если в payload нет instance_id.
+
+**Пример payload ChatFlow (фрагмент):**
+```json
+{
+  "messageType": "text",
+  "message": "Привет",
+  "metadata": {
+    "remoteJid": "77001234567@s.whatsapp.net",
+    "messageId": "msg_123"
+  },
+  "instance_id": "instance_abc"
+}
+```
+При наличии `instance_id` tenant выбирается по привязанному WhatsApp-аккаунту с таким `chatflow_instance_id`.
+
+---
+
 ## 🧪 cURL ПРИМЕРЫ
 
 ### Регистрация:

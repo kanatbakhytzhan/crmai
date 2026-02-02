@@ -467,6 +467,7 @@ async def update_tenant(
     default_owner_user_id: Optional[int] = None,
     ai_enabled: Optional[bool] = None,
     ai_prompt: Optional[str] = None,
+    webhook_key: Optional[str] = None,
 ) -> Optional[Tenant]:
     """Обновить tenant."""
     tenant = await get_tenant_by_id(db, tenant_id)
@@ -484,6 +485,8 @@ async def update_tenant(
         tenant.ai_enabled = ai_enabled
     if ai_prompt is not None:
         tenant.ai_prompt = ai_prompt
+    if webhook_key is not None:
+        tenant.webhook_key = (webhook_key or "").strip() or None
     await db.commit()
     await db.refresh(tenant)
     return tenant
@@ -503,18 +506,58 @@ async def get_tenant_ids_for_user(db: AsyncSession, user_id: int) -> List[int]:
     return [row[0] for row in result.all()]
 
 
+async def get_tenant_user(
+    db: AsyncSession, tenant_id: int, user_id: int
+) -> Optional[TenantUser]:
+    """Найти связку tenant-user по tenant_id и user_id."""
+    result = await db.execute(
+        select(TenantUser)
+        .where(TenantUser.tenant_id == tenant_id)
+        .where(TenantUser.user_id == user_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def list_tenant_users_with_user(
+    db: AsyncSession, tenant_id: int
+) -> List[tuple]:
+    """Список (TenantUser, User) для tenant. Для GET /api/admin/tenants/{id}/users."""
+    result = await db.execute(
+        select(TenantUser, User)
+        .join(User, TenantUser.user_id == User.id)
+        .where(TenantUser.tenant_id == tenant_id)
+        .order_by(TenantUser.id.asc())
+    )
+    return list(result.all())
+
+
 async def create_tenant_user(
     db: AsyncSession,
     tenant_id: int,
     user_id: int,
     role: str = "member",
 ) -> TenantUser:
-    """Добавить пользователя в tenant (multi-user в одном tenant)."""
+    """Добавить пользователя в tenant (multi-user в одном tenant). Если уже есть — вернуть существующую запись."""
+    existing = await get_tenant_user(db, tenant_id, user_id)
+    if existing:
+        return existing
     tu = TenantUser(tenant_id=tenant_id, user_id=user_id, role=(role or "member").strip() or "member")
     db.add(tu)
     await db.commit()
     await db.refresh(tu)
     return tu
+
+
+async def delete_tenant_user(
+    db: AsyncSession, tenant_id: int, user_id: int
+) -> bool:
+    """Удалить пользователя из tenant. Возвращает True если удалён."""
+    tu = await get_tenant_user(db, tenant_id, user_id)
+    if not tu:
+        return False
+    await db.delete(tu)
+    await db.commit()
+    return True
 
 
 async def get_tenant_by_slug(db: AsyncSession, slug: str) -> Optional[Tenant]:
@@ -565,17 +608,21 @@ async def create_whatsapp_account(
     db: AsyncSession,
     tenant_id: int,
     phone_number: str,
-    phone_number_id: str,
+    phone_number_id: Optional[str] = None,
     verify_token: Optional[str] = None,
     waba_id: Optional[str] = None,
+    chatflow_token: Optional[str] = None,
+    chatflow_instance_id: Optional[str] = None,
 ) -> WhatsAppAccount:
-    """Привязать WhatsApp номер к tenant."""
+    """Привязать WhatsApp (Meta и/или ChatFlow) к tenant."""
     acc = WhatsAppAccount(
         tenant_id=tenant_id,
         phone_number=phone_number,
-        phone_number_id=phone_number_id,
+        phone_number_id=(phone_number_id or "").strip() or None,
         verify_token=verify_token,
         waba_id=waba_id,
+        chatflow_token=(chatflow_token or "").strip() or None,
+        chatflow_instance_id=(chatflow_instance_id or "").strip() or None,
     )
     db.add(acc)
     await db.commit()
@@ -586,11 +633,37 @@ async def create_whatsapp_account(
 async def get_whatsapp_account_by_phone_number_id(
     db: AsyncSession, phone_number_id: str
 ) -> Optional[WhatsAppAccount]:
-    """Найти WhatsApp account по phone_number_id (для webhook)."""
+    """Найти WhatsApp account по phone_number_id (для webhook Meta)."""
+    if not (phone_number_id or "").strip():
+        return None
     result = await db.execute(
         select(WhatsAppAccount)
-        .where(WhatsAppAccount.phone_number_id == str(phone_number_id))
+        .where(WhatsAppAccount.phone_number_id == str(phone_number_id).strip())
         .where(WhatsAppAccount.is_active == True)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_whatsapp_account_by_chatflow_instance_id(
+    db: AsyncSession, instance_id: str
+) -> Optional[WhatsAppAccount]:
+    """Найти WhatsApp account по chatflow_instance_id (для ChatFlow webhook)."""
+    if not (instance_id or "").strip():
+        return None
+    result = await db.execute(
+        select(WhatsAppAccount)
+        .where(WhatsAppAccount.chatflow_instance_id == str(instance_id).strip())
+        .where(WhatsAppAccount.is_active == True)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_tenant_by_webhook_key(db: AsyncSession, webhook_key: str) -> Optional[Tenant]:
+    """Tenant по webhook_key (для POST /api/chatflow/webhook/{key})."""
+    if not (webhook_key or "").strip():
+        return None
+    result = await db.execute(
+        select(Tenant).where(Tenant.webhook_key == str(webhook_key).strip()).where(Tenant.is_active == True)
     )
     return result.scalar_one_or_none()
 

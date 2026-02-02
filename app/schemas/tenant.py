@@ -1,4 +1,4 @@
-"""Схемы для tenants и whatsapp_accounts (multi-tenant)."""
+"""Схемы для tenants, tenant_users и whatsapp_accounts (multi-tenant)."""
 from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional
@@ -17,6 +17,7 @@ class TenantUpdate(BaseModel):
     default_owner_user_id: Optional[int] = None
     ai_enabled: Optional[bool] = None
     ai_prompt: Optional[str] = None
+    webhook_key: Optional[str] = None  # UUID для POST /api/chatflow/webhook/{key}
 
 
 class TenantResponse(BaseModel):
@@ -27,6 +28,7 @@ class TenantResponse(BaseModel):
     default_owner_user_id: Optional[int] = None
     ai_enabled: bool = True
     ai_prompt: Optional[str] = None
+    webhook_key: Optional[str] = None
     created_at: datetime
 
     class Config:
@@ -56,11 +58,33 @@ class MeAISettingsUpdate(BaseModel):
     ai_enabled: Optional[bool] = None
 
 
+class TenantUserAdd(BaseModel):
+    """POST /api/admin/tenants/{id}/users — добавить пользователя по email."""
+    email: str
+    role: str = "member"  # manager | admin | member
+
+
+class TenantUserResponse(BaseModel):
+    """Пользователь tenant (для GET списка)."""
+    id: int
+    user_id: int
+    email: str
+    company_name: Optional[str] = None
+    role: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class WhatsAppAccountCreate(BaseModel):
+    """Привязка WhatsApp к tenant (Meta Cloud и/или ChatFlow). phone_number_id обязателен для Meta."""
     phone_number: str
-    phone_number_id: str
+    phone_number_id: Optional[str] = None  # для ChatFlow-only можно пусто
     verify_token: Optional[str] = None
     waba_id: Optional[str] = None
+    chatflow_token: Optional[str] = None
+    chatflow_instance_id: Optional[str] = None
 
 
 class WhatsAppAccountResponse(BaseModel):
@@ -71,6 +95,8 @@ class WhatsAppAccountResponse(BaseModel):
     waba_id: Optional[str] = None
     is_active: bool
     created_at: datetime
+    chatflow_token: Optional[str] = None
+    chatflow_instance_id: Optional[str] = None
 
     class Config:
         from_attributes = True

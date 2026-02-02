@@ -20,18 +20,20 @@ settings = get_settings()
 
 class AdminAuth(AuthenticationBackend):
     """
-    Аутентификация для админ-панели (Basic Auth)
+    Аутентификация для админ-панели (/admin).
+    Логин из ENV: ADMIN_PANEL_USERNAME, ADMIN_PANEL_PASSWORD (по умолчанию admin / admin123).
     """
     
     async def login(self, request: Request) -> bool:
+        import os
         form = await request.form()
-        username = form.get("username")
-        password = form.get("password")
+        username = (form.get("username") or "").strip()
+        password = (form.get("password") or "").strip()
         
-        ADMIN_USERNAME = "admin"
-        ADMIN_PASSWORD = "admin123"
+        admin_username = (os.getenv("ADMIN_PANEL_USERNAME") or "admin").strip()
+        admin_password = (os.getenv("ADMIN_PANEL_PASSWORD") or "admin123").strip()
         
-        if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+        if username == admin_username and password == admin_password:
             request.session.update({"admin": "authenticated"})
             return True
         

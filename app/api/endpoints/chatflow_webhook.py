@@ -17,7 +17,7 @@ import re
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
@@ -114,9 +114,36 @@ async def _get_default_owner_id(db: AsyncSession) -> int | None:
 
 
 async def _get_chatflow_tenant(db: AsyncSession):
-    """Первый активный tenant для ChatFlow (ai_enabled, команды /stop /start)."""
+    """Первый активный tenant для ChatFlow (fallback)."""
     tenants = await crud.list_tenants(db, active_only=True)
     return tenants[0] if tenants else None
+
+
+async def _resolve_tenant_from_payload(db: AsyncSession, data: dict[str, Any]):
+    """Return Tenant or None."""
+    """Определить tenant по instance_id или client_id в payload (chatflow_instance_id в whatsapp_accounts)."""
+    instance_id = (data.get("instance_id") or data.get("client_id") or "").strip()
+    if not instance_id:
+        meta = data.get("metadata") or {}
+        if isinstance(meta, dict):
+            instance_id = (meta.get("instance_id") or meta.get("instanceId") or meta.get("client_id") or "").strip()
+    if not instance_id:
+        return None
+    acc = await crud.get_whatsapp_account_by_chatflow_instance_id(db, instance_id)
+    if not acc:
+        return None
+    return await crud.get_tenant_by_id(db, acc.tenant_id)
+
+
+async def _resolve_tenant(db: AsyncSession, data: dict[str, Any], resolved_tenant: Any = None):
+    """Tenant: переданный resolved_tenant, иначе по instance_id/client_id в payload, иначе первый активный (fallback)."""
+    if resolved_tenant is not None:
+        return resolved_tenant
+    tenant = await _resolve_tenant_from_payload(db, data)
+    if tenant:
+        return tenant
+    log.warning("[CHATFLOW] no instance_id/client_id in payload, using first active tenant as fallback")
+    return await _get_chatflow_tenant(db)
 
 
 def parse_incoming_payload(data: dict[str, Any] | None) -> tuple[str, str, str, str]:
@@ -231,25 +258,11 @@ async def chatflow_ping():
     return {"ok": True, "pong": True}
 
 
-@router.post("/webhook")
-async def chatflow_webhook_post(request: Request, db: AsyncSession = Depends(get_db)):
+async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tenant: Any = None) -> dict:
     """
-    1) Парсинг remote_jid, msg_id, messageType, message.
-    2) Дедуп по msg_id → return {"ok": True, "dedup": True}.
-    3) user_text: text | voice (mediaData → Whisper) | иначе ответ "Пока понимаю только текст и голосовые."
-    4) При ошибке голосового → ответ "Не получилось распознать голосовое, напишите текстом.", return ok.
-    5) Сохранить входящее в БД (raw_json), загрузить историю по remote_jid (последние 15), LLM, сохранить ответ, send-text.
+    Общая логика обработки webhook: парсинг, дедуп, команды, контекст, LLM, ответ.
+    resolved_tenant: если задан, используется этот tenant; иначе — по instance_id в payload или первый активный.
     """
-    body = await request.body()
-    data = None
-    try:
-        data = json.loads(body) if body else None
-    except Exception as e:
-        log.warning("[CHATFLOW] JSON parse error: %s", repr(e))
-
-    if data is None or not isinstance(data, dict):
-        return {"ok": True}
-
     remote_jid, msg_id, msg_type, text_from_message = parse_incoming_payload(data)
     log.info("[CHATFLOW] msg_type=%s remote_jid=%s msg_id=%s", msg_type, remote_jid, msg_id)
 
@@ -286,10 +299,14 @@ async def chatflow_webhook_post(request: Request, db: AsyncSession = Depends(get
     if not (user_text and user_text.strip()):
         return {"ok": True}
 
+    # Определить tenant: переданный resolved_tenant, иначе по instance_id/client_id в payload, иначе первый активный
+    tenant = await _resolve_tenant(db, data, resolved_tenant)
+    tenant_id = tenant.id if tenant else None
+
     # Get or create conversation (channel=chatflow, external_id=remote_jid)
     try:
         conv = await conversation_service.get_or_create_conversation(
-            db, tenant_id=None, channel="chatflow", external_id=remote_jid, phone_number_id=""
+            db, tenant_id=tenant_id, channel="chatflow", external_id=remote_jid, phone_number_id=""
         )
     except Exception as e:
         log.error("[CHATFLOW] get_or_create_conversation error: %s", type(e).__name__, exc_info=True)
@@ -314,9 +331,7 @@ async def chatflow_webhook_post(request: Request, db: AsyncSession = Depends(get
         await _send_reply_and_return_ok(remote_jid, "Ок ✅ AI снова включён в этом чате.")
         return {"ok": True}
 
-    # Остальные команды (stop all / start all) и обычные сообщения
-    tenant = await _get_chatflow_tenant(db)
-    tenant_id = tenant.id if tenant else None
+    # Остальные команды (stop all / start all) и обычные сообщения (tenant уже определён выше)
     ai_enabled = getattr(tenant, "ai_enabled", True) if tenant else True
     channel_cf = "chatflow"
     phone_number_id_cf = ""
@@ -449,3 +464,46 @@ async def chatflow_webhook_post(request: Request, db: AsyncSession = Depends(get
 
     await _send_reply_and_return_ok(remote_jid, reply)
     return {"ok": True}
+
+
+@router.post("/webhook")
+async def chatflow_webhook_post(request: Request, db: AsyncSession = Depends(get_db)):
+    """
+    1) Парсинг remote_jid, msg_id, messageType, message.
+    2) Дедуп по msg_id → return {"ok": True, "dedup": True}.
+    3) Tenant: по instance_id/client_id в payload (whatsapp_accounts.chatflow_instance_id), иначе первый активный (fallback).
+    4) Остальная логика — см. _process_webhook.
+    """
+    body = await request.body()
+    data = None
+    try:
+        data = json.loads(body) if body else None
+    except Exception as e:
+        log.warning("[CHATFLOW] JSON parse error: %s", repr(e))
+    if data is None or not isinstance(data, dict):
+        return {"ok": True}
+    return await _process_webhook(db, data, resolved_tenant=None)
+
+
+@router.post("/webhook/{tenant_key}")
+async def chatflow_webhook_post_by_key(
+    tenant_key: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Webhook с привязкой к tenant по webhook_key (UUID в tenants.webhook_key).
+    Используйте этот URL в ChatFlow, если instance_id в payload не привязан к tenant.
+    """
+    body = await request.body()
+    data = None
+    try:
+        data = json.loads(body) if body else None
+    except Exception as e:
+        log.warning("[CHATFLOW] JSON parse error: %s", repr(e))
+    if data is None or not isinstance(data, dict):
+        return {"ok": True}
+    tenant = await crud.get_tenant_by_webhook_key(db, tenant_key)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="tenant_not_found")
+    return await _process_webhook(db, data, resolved_tenant=tenant)

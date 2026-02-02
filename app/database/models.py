@@ -21,6 +21,7 @@ class Tenant(Base):
     default_owner_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     ai_prompt = Column(Text, nullable=True)  # кастомный system prompt для OpenAI (если пусто — дефолтный)
     ai_enabled = Column(Boolean, default=True, nullable=False)  # автоответ AI вкл/выкл (команды /start /stop)
+    webhook_key = Column(String(64), unique=True, index=True, nullable=True)  # UUID для POST /api/chatflow/webhook/{key}
     created_at = Column(DateTime, default=datetime.utcnow)
 
     whatsapp_accounts = relationship("WhatsAppAccount", back_populates="tenant", cascade="all, delete-orphan")
@@ -42,15 +43,17 @@ class TenantUser(Base):
 
 
 class WhatsAppAccount(Base):
-    """Привязанный к tenant WhatsApp номер (phone_number_id от Meta)."""
+    """Привязанный к tenant WhatsApp (Meta Cloud API и/или ChatFlow)."""
     __tablename__ = "whatsapp_accounts"
 
     id = Column(Integer, primary_key=True, index=True)
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
     phone_number = Column(String, nullable=False)
-    phone_number_id = Column(String, unique=True, index=True, nullable=False)
+    phone_number_id = Column(String, unique=True, index=True, nullable=True)  # Meta; для ChatFlow может быть пусто
     waba_id = Column(String, nullable=True)
     verify_token = Column(String, nullable=True)
+    chatflow_token = Column(String, nullable=True)   # токен ChatFlow для отправки ответов
+    chatflow_instance_id = Column(String(255), nullable=True, index=True)  # instance_id из payload → tenant
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 

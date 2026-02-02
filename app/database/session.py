@@ -157,6 +157,39 @@ async def init_db():
                 print("[OK] Kolonka conversations.ai_paused proverena/dobavlena")
             except Exception as e:
                 print(f"[WARN] conversations.ai_paused migration: {type(e).__name__}: {e}")
+            # tenants.webhook_key (UUID для POST /api/chatflow/webhook/{key})
+            try:
+                await conn.execute(text(
+                    "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS webhook_key VARCHAR(64) UNIQUE"
+                ))
+                await conn.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ix_tenants_webhook_key ON tenants(webhook_key) WHERE webhook_key IS NOT NULL"
+                ))
+                print("[OK] Kolonka tenants.webhook_key proverena/dobavlena")
+            except Exception as e:
+                print(f"[WARN] tenants.webhook_key migration: {type(e).__name__}: {e}")
+            # whatsapp_accounts: chatflow_token, chatflow_instance_id; phone_number_id nullable
+            try:
+                await conn.execute(text(
+                    "ALTER TABLE whatsapp_accounts ADD COLUMN IF NOT EXISTS chatflow_token VARCHAR(512)"
+                ))
+                await conn.execute(text(
+                    "ALTER TABLE whatsapp_accounts ADD COLUMN IF NOT EXISTS chatflow_instance_id VARCHAR(255)"
+                ))
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_whatsapp_accounts_chatflow_instance_id ON whatsapp_accounts(chatflow_instance_id) WHERE chatflow_instance_id IS NOT NULL"
+                ))
+                print("[OK] Kolonki whatsapp_accounts chatflow provereny/dobavleny")
+            except Exception as e:
+                print(f"[WARN] whatsapp_accounts chatflow migration: {type(e).__name__}: {e}")
+            try:
+                await conn.execute(text(
+                    "ALTER TABLE whatsapp_accounts ALTER COLUMN phone_number_id DROP NOT NULL"
+                ))
+                print("[OK] whatsapp_accounts.phone_number_id nullable")
+            except Exception as e:
+                if "does not exist" not in str(e).lower():
+                    print(f"[WARN] whatsapp_accounts phone_number_id nullable: {type(e).__name__}: {e}")
             # Явное CREATE TABLE IF NOT EXISTS для Render/Postgres (на случай если create_all не создал)
             try:
                 await conn.execute(text("""

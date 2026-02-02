@@ -215,6 +215,7 @@ async def chat_with_gpt(
     messages: List[Dict[str, str]],
     use_functions: bool = True,
     extra_system_content: Optional[str] = None,
+    system_override: Optional[str] = None,
 ) -> Tuple[str, Optional[Dict]]:
     """
     Отправить сообщения в GPT-4o и получить ответ.
@@ -223,12 +224,13 @@ async def chat_with_gpt(
         messages: История сообщений в формате OpenAI
         use_functions: Использовать ли Function Calling
         extra_system_content: Дополнительный текст к system (например: не повторять приветствия при контексте)
+        system_override: Заменить дефолтный system prompt (например tenant.ai_prompt). Если пусто — используется SYSTEM_PROMPT.
 
     Returns:
         Tuple: (текст ответа, данные function_call если есть)
     """
     try:
-        system_content = SYSTEM_PROMPT
+        system_content = (system_override or "").strip() or SYSTEM_PROMPT
         if extra_system_content and extra_system_content.strip():
             system_content = system_content + "\n\n" + extra_system_content.strip()
         full_messages = [{"role": "system", "content": system_content}] + messages

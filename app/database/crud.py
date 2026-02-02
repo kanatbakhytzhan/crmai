@@ -8,7 +8,7 @@ from typing import List, Optional
 from datetime import datetime, timedelta
 
 from app.database.models import (
-    User, BotUser, Message, Lead, LeadStatus, Tenant, WhatsAppAccount,
+    User, BotUser, Message, Lead, LeadStatus, LeadComment, Tenant, TenantUser, WhatsAppAccount,
     Conversation, ConversationMessage,
 )
 from app.core.security import get_password_hash
@@ -210,8 +210,10 @@ async def get_user_leads(
 ) -> List[Lead]:
     """
     Получить заявки пользователя. Если multitenant_include_tenant_leads=True,
-    также включаются лиды с tenant_id, у которых tenant.default_owner_user_id = owner_id.
+    также включаются лиды: tenant.default_owner_user_id = owner_id ИЛИ
+    пользователь в tenant_users для этого tenant (multi-user в одном tenant).
     """
+    from sqlalchemy import or_
     if not multitenant_include_tenant_leads:
         result = await db.execute(
             select(Lead)
@@ -220,11 +222,18 @@ async def get_user_leads(
             .limit(limit)
         )
         return list(result.scalars().all())
-    from sqlalchemy import or_
-    subq = select(Tenant.id).where(Tenant.default_owner_user_id == owner_id)
+    # Лиды владельца + лиды tenant (default_owner) + лиды tenant (tenant_users)
+    tenant_ids_default = select(Tenant.id).where(Tenant.default_owner_user_id == owner_id)
+    tenant_ids_member = select(TenantUser.tenant_id).where(TenantUser.user_id == owner_id)
     result = await db.execute(
         select(Lead)
-        .where(or_(Lead.owner_id == owner_id, Lead.tenant_id.in_(subq)))
+        .where(
+            or_(
+                Lead.owner_id == owner_id,
+                Lead.tenant_id.in_(tenant_ids_default),
+                Lead.tenant_id.in_(tenant_ids_member),
+            )
+        )
         .order_by(Lead.created_at.desc())
         .limit(limit)
     )
@@ -240,7 +249,7 @@ async def get_lead_by_id(
 ) -> Optional[Lead]:
     """
     Получить лид по ID. Доступ если owner_id совпадает или (multitenant и
-    lead.tenant_id и tenant.default_owner_user_id == owner_id).
+    lead.tenant_id и (tenant.default_owner_user_id == owner_id или user в tenant_users)).
     """
     result = await db.execute(select(Lead).where(Lead.id == lead_id))
     lead = result.scalar_one_or_none()
@@ -251,6 +260,15 @@ async def get_lead_by_id(
     if multitenant_include_tenant_leads and lead.tenant_id is not None:
         tenant = await get_tenant_by_id(db, lead.tenant_id)
         if tenant and getattr(tenant, "default_owner_user_id", None) == owner_id:
+            return lead
+        # Доступ по tenant_users (multi-user в одном tenant)
+        tu = await db.execute(
+            select(TenantUser).where(
+                TenantUser.tenant_id == lead.tenant_id,
+                TenantUser.user_id == owner_id,
+            )
+        )
+        if tu.scalar_one_or_none():
             return lead
     return None
 
@@ -334,18 +352,77 @@ async def delete_lead(
 ) -> bool:
     """
     Удалить заявку по ID (с проверкой владельца)
-    
+
     Args:
         db: Сессия БД
         lead_id: ID заявки
         owner_id: ID владельца (для безопасности)
-        
+
     Returns:
         True если заявка была удалена, False если не найдена
     """
     lead = await get_lead_by_id(db, lead_id, owner_id, multitenant_include_tenant_leads=multitenant_include_tenant_leads)
     if lead:
         await db.delete(lead)
+        await db.commit()
+        return True
+    return False
+
+
+# ========== LEAD COMMENTS ==========
+
+async def get_lead_comments(
+    db: AsyncSession,
+    lead_id: int,
+    limit: int = 100,
+) -> List[LeadComment]:
+    """Комментарии к лиду по created_at desc."""
+    result = await db.execute(
+        select(LeadComment)
+        .where(LeadComment.lead_id == lead_id)
+        .order_by(LeadComment.created_at.desc())
+        .limit(limit)
+    )
+    return list(result.scalars().all())
+
+
+async def get_last_lead_comment(db: AsyncSession, lead_id: int) -> Optional[LeadComment]:
+    """Последний комментарий к лиду (preview для GET /api/leads)."""
+    result = await db.execute(
+        select(LeadComment)
+        .where(LeadComment.lead_id == lead_id)
+        .order_by(LeadComment.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def create_lead_comment(
+    db: AsyncSession,
+    lead_id: int,
+    user_id: int,
+    text: str,
+) -> LeadComment:
+    """Добавить комментарий к лиду."""
+    comment = LeadComment(lead_id=lead_id, user_id=user_id, text=(text or "").strip())
+    db.add(comment)
+    await db.commit()
+    await db.refresh(comment)
+    return comment
+
+
+async def get_lead_comment_by_id(db: AsyncSession, comment_id: int) -> Optional[LeadComment]:
+    """Комментарий по ID."""
+    result = await db.execute(select(LeadComment).where(LeadComment.id == comment_id))
+    return result.scalar_one_or_none()
+
+
+async def delete_lead_comment(db: AsyncSession, comment_id: int) -> bool:
+    """Удалить комментарий по ID."""
+    result = await db.execute(select(LeadComment).where(LeadComment.id == comment_id))
+    comment = result.scalar_one_or_none()
+    if comment:
+        await db.delete(comment)
         await db.commit()
         return True
     return False
@@ -401,6 +478,28 @@ async def get_tenant_by_id(db: AsyncSession, tenant_id: int) -> Optional[Tenant]
     """Получить tenant по ID."""
     result = await db.execute(select(Tenant).where(Tenant.id == tenant_id))
     return result.scalar_one_or_none()
+
+
+async def get_tenant_ids_for_user(db: AsyncSession, user_id: int) -> List[int]:
+    """Tenant IDs, в которых состоит пользователь (tenant_users). Для доступа к лидам tenant."""
+    result = await db.execute(
+        select(TenantUser.tenant_id).where(TenantUser.user_id == user_id)
+    )
+    return [row[0] for row in result.all()]
+
+
+async def create_tenant_user(
+    db: AsyncSession,
+    tenant_id: int,
+    user_id: int,
+    role: str = "member",
+) -> TenantUser:
+    """Добавить пользователя в tenant (multi-user в одном tenant)."""
+    tu = TenantUser(tenant_id=tenant_id, user_id=user_id, role=(role or "member").strip() or "member")
+    db.add(tu)
+    await db.commit()
+    await db.refresh(tu)
+    return tu
 
 
 async def get_tenant_by_slug(db: AsyncSession, slug: str) -> Optional[Tenant]:

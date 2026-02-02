@@ -56,7 +56,8 @@ class LeadResponse(BaseModel):
     language: str
     status: str  # "new", "in_progress", "done", "cancelled" — для CRM
     created_at: datetime
-    
+    last_comment: Optional[str] = None  # preview последнего комментария (до 100 символов)
+
     model_config = {"from_attributes": True}
 
     @field_validator("status", mode="before")
@@ -66,3 +67,19 @@ class LeadResponse(BaseModel):
         if hasattr(v, "value"):
             return v.value
         return str(v) if v is not None else "new"
+
+
+class LeadCommentCreate(BaseModel):
+    """Создание комментария к лиду"""
+    text: str = Field(..., min_length=1)
+
+
+class LeadCommentResponse(BaseModel):
+    """Комментарий к лиду"""
+    id: int
+    lead_id: int
+    user_id: int
+    text: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}

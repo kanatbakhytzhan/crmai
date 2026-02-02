@@ -4,7 +4,7 @@ Unified conversation history: DB-backed per (channel, external_id). Web channel 
 """
 import os
 import tempfile
-from fastapi import APIRouter, Depends, HTTPException, Form, UploadFile, File, Request
+from fastapi import APIRouter, Depends, HTTPException, Form, UploadFile, File, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
@@ -12,7 +12,7 @@ from app.api.deps import get_db, get_current_user
 from app.core.config import get_settings
 from app.database import crud
 from app.database.models import User
-from app.schemas.lead import LeadResponse
+from app.schemas.lead import LeadResponse, LeadCommentCreate, LeadCommentResponse
 from app.services import openai_service, telegram_service, conversation_service
 
 router = APIRouter()
@@ -257,8 +257,13 @@ async def get_leads(
     )
     # Диагностика: по какому владельцу фильтруем и сколько лидов найдено
     print(f"[GET /api/leads] current_user.id={current_user.id}, email={current_user.email}, leads_count={len(leads)}")
-    # Сериализация через LeadResponse: status гарантированно строка ("new", "in_progress" и т.д.) для CRM
-    leads_data = [LeadResponse.model_validate(l) for l in leads]
+    # Сериализация + last_comment (preview до 100 символов)
+    leads_data = []
+    for l in leads:
+        item = LeadResponse.model_validate(l).model_dump()
+        last_c = await crud.get_last_lead_comment(db, l.id)
+        item["last_comment"] = (last_c.text[:100] if last_c and last_c.text else None) if last_c else None
+        leads_data.append(item)
     return {"leads": leads_data, "total": len(leads_data)}
 
 
@@ -388,3 +393,62 @@ async def delete_lead(
         "status": "success",
         "message": f"Lead {lead_id} deleted successfully"
     }
+
+
+@router.get("/leads/{lead_id}/comments", response_model=dict)
+async def get_lead_comments(
+    lead_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Список комментариев к лиду.
+    Требует JWT. Доступ только к своим лидам (или лидам tenant).
+    """
+    multitenant = (getattr(get_settings(), "multitenant_enabled", "false") or "false").upper() == "TRUE"
+    lead = await crud.get_lead_by_id(db, lead_id, current_user.id, multitenant_include_tenant_leads=multitenant)
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    comments = await crud.get_lead_comments(db, lead_id=lead_id)
+    items = [LeadCommentResponse.model_validate(c) for c in comments]
+    return {"comments": items, "total": len(items)}
+
+
+@router.post("/leads/{lead_id}/comments", response_model=LeadCommentResponse, status_code=status.HTTP_201_CREATED)
+async def create_lead_comment(
+    lead_id: int,
+    body: LeadCommentCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Добавить комментарий к лиду.
+    Требует JWT. Доступ только к своим лидам (или лидам tenant).
+    """
+    multitenant = (getattr(get_settings(), "multitenant_enabled", "false") or "false").upper() == "TRUE"
+    lead = await crud.get_lead_by_id(db, lead_id, current_user.id, multitenant_include_tenant_leads=multitenant)
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    comment = await crud.create_lead_comment(db, lead_id=lead_id, user_id=current_user.id, text=body.text)
+    return comment
+
+
+@router.delete("/leads/comments/{comment_id}")
+async def delete_lead_comment(
+    comment_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Удалить комментарий по ID.
+    Требует JWT. Доступ только если лид комментария принадлежит пользователю (или tenant).
+    """
+    comment = await crud.get_lead_comment_by_id(db, comment_id)
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    multitenant = (getattr(get_settings(), "multitenant_enabled", "false") or "false").upper() == "TRUE"
+    lead = await crud.get_lead_by_id(db, comment.lead_id, current_user.id, multitenant_include_tenant_leads=multitenant)
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    await crud.delete_lead_comment(db, comment_id)
+    return {"ok": True}

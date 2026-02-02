@@ -126,9 +126,14 @@ async def webhook_post(
                 messages_for_gpt = await conversation_service.build_context_messages(db, conv.id, limit=20)
                 log.info(f"[WA][CHAT] loaded {len(messages_for_gpt)} context messages")
 
+                tenant = await crud.get_tenant_by_id(db, tenant_id)
+                ai_prompt_override = (getattr(tenant, "ai_prompt", None) or "").strip() or None
+
                 assistant_reply = ""
                 try:
-                    response_text, function_call = await openai_service.chat_with_gpt(messages_for_gpt, use_functions=True)
+                    response_text, function_call = await openai_service.chat_with_gpt(
+                        messages_for_gpt, use_functions=True, system_override=ai_prompt_override
+                    )
                     assistant_reply = response_text or ""
                     if function_call and function_call.get("name") == "register_lead":
                         assistant_reply = "[Lead registered]"

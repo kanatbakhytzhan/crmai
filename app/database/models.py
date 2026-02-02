@@ -19,9 +19,25 @@ class Tenant(Base):
     slug = Column(String, unique=True, index=True, nullable=False)
     is_active = Column(Boolean, default=True)
     default_owner_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    ai_prompt = Column(Text, nullable=True)  # кастомный system prompt для OpenAI (если пусто — дефолтный)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     whatsapp_accounts = relationship("WhatsAppAccount", back_populates="tenant", cascade="all, delete-orphan")
+    tenant_users = relationship("TenantUser", back_populates="tenant", cascade="all, delete-orphan")
+
+
+class TenantUser(Base):
+    """Связка пользователя с tenant (multi-user в одном tenant)."""
+    __tablename__ = "tenant_users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    role = Column(String(50), default="member", nullable=True)  # owner, admin, member
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    tenant = relationship("Tenant", back_populates="tenant_users")
+    user = relationship("User", backref="tenant_users")
 
 
 class WhatsAppAccount(Base):
@@ -161,3 +177,18 @@ class Lead(Base):
     # Relationships
     owner = relationship("User", back_populates="leads")
     bot_user = relationship("BotUser", back_populates="leads")
+    comments = relationship("LeadComment", back_populates="lead", cascade="all, delete-orphan")
+
+
+class LeadComment(Base):
+    """Комментарий к лиду (от пользователя CRM)."""
+    __tablename__ = "lead_comments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    text = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    lead = relationship("Lead", back_populates="comments")
+    user = relationship("User", backref="lead_comments")

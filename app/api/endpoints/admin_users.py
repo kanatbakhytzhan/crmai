@@ -12,7 +12,6 @@ from app.schemas.admin_users import (
     UserAdminList,
     UserAdminCreate,
     UserAdminUpdate,
-    ResetPasswordRequest,
 )
 
 router = APIRouter()
@@ -98,21 +97,31 @@ async def update_user(
     return _user_to_admin_list(user)
 
 
+def _generate_temporary_password(length: int = 12) -> str:
+    """Генерация временного пароля (буквы + цифры)."""
+    import secrets
+    import string
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
 @router.post("/users/{user_id}/reset-password")
 async def reset_password(
-  user_id: int,
-  body: ResetPasswordRequest,
-  db: AsyncSession = Depends(get_db),
-  current_user: User = Depends(get_current_admin),
+    user_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin),
 ):
     """
-    Сброс пароля пользователя.
-    404 если пользователь не найден.
+    Сброс пароля пользователя админом.
+    Генерирует временный пароль (10–12 символов), сохраняет в БД, возвращает в JSON.
+    Email/SMS не отправляется (MVP).
     """
-    user = await crud.set_user_password(db, user_id, body.password)
+    user = await crud.get_user_by_id(db, user_id)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
+            detail="User not found",
         )
-    return {"ok": True}
+    temporary_password = _generate_temporary_password(12)
+    await crud.set_user_password(db, user_id, temporary_password)
+    return {"ok": True, "temporary_password": temporary_password}

@@ -18,6 +18,7 @@ from app.schemas.tenant import (
     TenantUserResponse,
     WhatsAppAccountCreate,
     WhatsAppAccountResponse,
+    WhatsAppAccountUpsert,
 )
 
 router = APIRouter()
@@ -67,6 +68,21 @@ async def update_tenant(
     if not tenant:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
     return TenantResponse.model_validate(tenant)
+
+
+@router.get("/tenants/{tenant_id}", response_model=dict)
+async def get_tenant(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin),
+):
+    """Один tenant + текущая привязка WhatsApp (whatsapp_connection) для формы редактирования."""
+    tenant = await crud.get_tenant_by_id(db, tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
+    accounts = await crud.list_whatsapp_accounts_by_tenant(db, tenant_id)
+    whatsapp_connection = WhatsAppAccountResponse.model_validate(accounts[0]) if accounts else None
+    return {"tenant": TenantResponse.model_validate(tenant), "whatsapp_connection": whatsapp_connection}
 
 
 @router.get("/tenants", response_model=dict)
@@ -196,6 +212,44 @@ async def update_ai_settings(
     )
 
 
+@router.put("/tenants/{tenant_id}/whatsapp", response_model=WhatsAppAccountResponse)
+async def upsert_whatsapp(
+    tenant_id: int,
+    body: WhatsAppAccountUpsert,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin),
+):
+    """
+    Сохранить/обновить привязку WhatsApp/ChatFlow для tenant (одна запись на tenant).
+    Если запись уже есть — обновить; если нет — создать.
+    При active=true обязательны chatflow_token и chatflow_instance_id (иначе бот не отвечает).
+    """
+    tenant = await crud.get_tenant_by_id(db, tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
+    if body.is_active:
+        token_ok = (body.chatflow_token or "").strip()
+        instance_ok = (body.chatflow_instance_id or "").strip()
+        if not token_ok or not instance_ok:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="When active=true, chatflow_token and chatflow_instance_id are required",
+            )
+    phone_number = (body.phone_number or "").strip() or "—"
+    instance_id = (body.chatflow_instance_id or "").strip() or None
+    token = (body.chatflow_token or "").strip() or None
+    print("[ADMIN] whatsapp upsert", tenant_id, instance_id, phone_number, body.is_active)
+    acc = await crud.upsert_whatsapp_for_tenant(
+        db,
+        tenant_id=tenant_id,
+        phone_number=phone_number,
+        chatflow_token=token,
+        chatflow_instance_id=instance_id,
+        is_active=body.is_active,
+    )
+    return WhatsAppAccountResponse.model_validate(acc)
+
+
 @router.post("/tenants/{tenant_id}/whatsapp", response_model=WhatsAppAccountResponse, status_code=status.HTTP_201_CREATED)
 async def attach_whatsapp(
     tenant_id: int,
@@ -204,9 +258,9 @@ async def attach_whatsapp(
     current_user: User = Depends(get_current_admin),
 ):
     """
-    Привязать WhatsApp (Meta Cloud и/или ChatFlow) к tenant.
+    Привязать WhatsApp (Meta Cloud и/или ChatFlow) к tenant (создать новую запись).
+    Для формы редактирования используйте PUT /tenants/{tenant_id}/whatsapp (upsert).
     Body: phone_number, phone_number_id (для Meta), chatflow_token, chatflow_instance_id (для ChatFlow).
-    Пример: { "phone_number": "+77...", "phone_number_id": "123", "chatflow_token": "...", "chatflow_instance_id": "inst_1" }
     """
     tenant = await crud.get_tenant_by_id(db, tenant_id)
     if not tenant:

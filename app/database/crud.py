@@ -615,16 +615,18 @@ async def create_whatsapp_account(
     waba_id: Optional[str] = None,
     chatflow_token: Optional[str] = None,
     chatflow_instance_id: Optional[str] = None,
+    is_active: bool = True,
 ) -> WhatsAppAccount:
     """Привязать WhatsApp (Meta и/или ChatFlow) к tenant."""
     acc = WhatsAppAccount(
         tenant_id=tenant_id,
-        phone_number=phone_number,
+        phone_number=(phone_number or "").strip() or "—",
         phone_number_id=(phone_number_id or "").strip() or None,
         verify_token=verify_token,
         waba_id=waba_id,
         chatflow_token=(chatflow_token or "").strip() or None,
         chatflow_instance_id=(chatflow_instance_id or "").strip() or None,
+        is_active=is_active,
     )
     db.add(acc)
     await db.commit()
@@ -678,6 +680,75 @@ async def list_whatsapp_accounts_by_tenant(
         select(WhatsAppAccount).where(WhatsAppAccount.tenant_id == tenant_id).order_by(WhatsAppAccount.id.asc())
     )
     return list(result.scalars().all())
+
+
+async def update_whatsapp_account(
+    db: AsyncSession,
+    account_id: int,
+    tenant_id: int,
+    *,
+    phone_number: Optional[str] = None,
+    phone_number_id: Optional[str] = None,
+    chatflow_token: Optional[str] = None,
+    chatflow_instance_id: Optional[str] = None,
+    is_active: Optional[bool] = None,
+) -> Optional[WhatsAppAccount]:
+    """Обновить существующий whatsapp_account (только если tenant_id совпадает)."""
+    result = await db.execute(
+        select(WhatsAppAccount).where(WhatsAppAccount.id == account_id).where(WhatsAppAccount.tenant_id == tenant_id)
+    )
+    acc = result.scalar_one_or_none()
+    if not acc:
+        return None
+    if phone_number is not None:
+        acc.phone_number = (phone_number or "").strip() or acc.phone_number or "—"
+    if phone_number_id is not None:
+        acc.phone_number_id = (phone_number_id or "").strip() or None
+    if chatflow_token is not None:
+        acc.chatflow_token = (chatflow_token or "").strip() or None
+    if chatflow_instance_id is not None:
+        acc.chatflow_instance_id = (chatflow_instance_id or "").strip() or None
+    if is_active is not None:
+        acc.is_active = is_active
+    await db.commit()
+    await db.refresh(acc)
+    return acc
+
+
+async def upsert_whatsapp_for_tenant(
+    db: AsyncSession,
+    tenant_id: int,
+    *,
+    phone_number: str = "",
+    phone_number_id: Optional[str] = None,
+    chatflow_token: Optional[str] = None,
+    chatflow_instance_id: Optional[str] = None,
+    is_active: bool = True,
+) -> WhatsAppAccount:
+    """Если у tenant есть whatsapp_account — обновить (первый по id), иначе создать. Одна запись на tenant для формы админки."""
+    accounts = await list_whatsapp_accounts_by_tenant(db, tenant_id)
+    phone = (phone_number or "").strip() or "—"
+    if accounts:
+        acc = await update_whatsapp_account(
+            db,
+            accounts[0].id,
+            tenant_id,
+            phone_number=phone,
+            phone_number_id=phone_number_id,
+            chatflow_token=chatflow_token,
+            chatflow_instance_id=chatflow_instance_id,
+            is_active=is_active,
+        )
+        return acc
+    return await create_whatsapp_account(
+        db,
+        tenant_id=tenant_id,
+        phone_number=phone,
+        phone_number_id=phone_number_id,
+        chatflow_token=chatflow_token,
+        chatflow_instance_id=chatflow_instance_id,
+        is_active=is_active,
+    )
 
 
 async def delete_whatsapp_account(

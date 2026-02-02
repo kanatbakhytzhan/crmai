@@ -91,7 +91,7 @@ class WhatsAppAccountResponse(BaseModel):
     id: int
     tenant_id: int
     phone_number: str
-    phone_number_id: str
+    phone_number_id: Optional[str] = None
     waba_id: Optional[str] = None
     is_active: bool
     created_at: datetime
@@ -100,3 +100,11 @@ class WhatsAppAccountResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class WhatsAppAccountUpsert(BaseModel):
+    """PUT /api/admin/tenants/{id}/whatsapp — сохранить/обновить привязку (token, instance_id, phone_number, active)."""
+    chatflow_token: Optional[str] = None
+    chatflow_instance_id: Optional[str] = None
+    phone_number: Optional[str] = None
+    is_active: bool = True

@@ -1,81 +1,52 @@
 """
-Создание аккаунта для Kana (skai.media)
+Создание/обновление админ-аккаунта Kana (skai.media).
+Создаёт пользователя kana.bahytzhan@gmail.com с паролем Kanaezz15! и is_admin=True.
+Если пользователь уже есть — ставит is_admin=True и при необходимости обновляет пароль.
 """
 import asyncio
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.session import AsyncSessionLocal
+from app.database.session import AsyncSessionLocal, init_db
 from app.database import crud
-from app.schemas.user import UserCreate
+
+EMAIL = "kana.bahytzhan@gmail.com"
+PASSWORD = "Kanaezz15!"
+COMPANY = "skai.media"
 
 
 async def create_kana_account():
-    """Создание аккаунта Kana с ID=1"""
-    
+    """Создать или обновить админ-аккаунт Kana."""
+    await init_db()
+
     print("=" * 70)
-    print("CREATING KANA ACCOUNT (skai.media)")
+    print("KANA ADMIN ACCOUNT (skai.media)")
     print("=" * 70)
-    
+
     async with AsyncSessionLocal() as db:
-        # Проверяем существует ли пользователь
-        existing = await crud.get_user_by_email(db, "kana.bahytzhan@gmail.com")
-        
+        existing = await crud.get_user_by_email(db, EMAIL)
+
         if existing:
-            print(f"\n[INFO] User already exists!")
-            print(f"       ID: {existing.id}")
-            print(f"       Email: {existing.email}")
-            print(f"       Company: {existing.company_name}")
-            print(f"\n[INFO] Use this for login:")
-            print(f"       Email: kana.bahytzhan@gmail.com")
-            print(f"       Password: Kanaezz15!")
-            return
-        
-        # Создаем нового пользователя
-        user = await crud.create_user(
-            db=db,
-            email="kana.bahytzhan@gmail.com",
-            password="Kanaezz15!",
-            company_name="skai.media"
-        )
-        
-        print(f"\n[SUCCESS] Account created!")
-        print(f"\n" + "=" * 70)
-        print(f"  SKAI.MEDIA - Account Details")
-        print(f"=" * 70)
-        print(f"  ID:       {user.id}")
-        print(f"  Email:    {user.email}")
-        print(f"  Company:  {user.company_name}")
-        print(f"  Active:   {user.is_active}")
-        print(f"=" * 70)
-        
-        print(f"\n[LOGIN CREDENTIALS]")
-        print(f"   Email:    kana.bahytzhan@gmail.com")
-        print(f"   Password: Kanaezz15!")
-        
-        print(f"\n[ACCESS POINTS]")
-        print(f"   Admin Panel:  http://localhost:8000/admin")
-        print(f"                 (admin / admin123)")
-        print(f"\n   Web Chat:     http://192.168.0.10:8000/")
-        print(f"                 (For clients)")
-        
-        print(f"\n   API (Swagger): http://localhost:8000/docs")
-        print(f"                  (Use login endpoint to get JWT token)")
-        
-        print(f"\n[NEXT STEPS]")
-        print(f"   1. Login to get JWT token:")
-        print(f"      POST /api/auth/login")
-        print(f"      username: kana.bahytzhan@gmail.com")
-        print(f"      password: Kanaezz15!")
-        
-        print(f"\n   2. Use token to access your leads:")
-        print(f"      GET /api/leads")
-        print(f"      Authorization: Bearer YOUR_TOKEN")
-        
-        print(f"\n   3. All leads from web chat will be assigned to you!")
-        print(f"      (owner_id = {user.id})")
-        
-        print(f"\n" + "=" * 70)
-        print("READY TO USE! 🚀")
+            # Обновляем: is_admin=True и пароль (на случай смены)
+            await crud.set_user_password(db, existing.id, PASSWORD)
+            user = await crud.update_user(db, existing.id, is_admin=True)
+            user = user or existing
+            print(f"\n[OK] User already exists, updated to admin + password reset.")
+            print(f"     ID: {user.id}, Email: {user.email}, is_admin: {getattr(user, 'is_admin', True)}")
+        else:
+            user = await crud.create_user(
+                db=db,
+                email=EMAIL,
+                password=PASSWORD,
+                company_name=COMPANY,
+            )
+            user = await crud.update_user(db, user.id, is_admin=True) or user
+            print(f"\n[OK] New admin user created.")
+            print(f"     ID: {user.id}, Email: {user.email}")
+
+        print(f"\n[LOGIN]")
+        print(f"   Email:    {EMAIL}")
+        print(f"   Password: {PASSWORD}")
+        print(f"\n   POST /api/auth/login  (username=email, password=password)")
+        print(f"   Then use JWT in Authorization: Bearer <token> for /api/admin/* and /api/leads")
         print("=" * 70)
 
 

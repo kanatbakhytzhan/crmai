@@ -58,7 +58,7 @@ async def init_db():
     async with engine.begin() as conn:
         # Создаем все таблицы
         await conn.run_sync(Base.metadata.create_all)
-        # PostgreSQL: добавить колонку is_admin если таблица users уже была без неё
+        # is_admin в users (PostgreSQL и SQLite — миграция для старых БД)
         if "postgresql" in db_url:
             try:
                 await conn.execute(text(
@@ -67,6 +67,18 @@ async def init_db():
                 print("[OK] Kolonka is_admin proverena/dobavlena")
             except Exception as e:
                 print(f"[WARN] is_admin migration: {type(e).__name__}: {e}")
+        elif "sqlite" in db_url:
+            try:
+                await conn.execute(text(
+                    "ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0"
+                ))
+                print("[OK] SQLite: kolonka is_admin dobavlena")
+            except Exception as e:
+                if "duplicate column" in str(e).lower():
+                    print("[OK] SQLite: is_admin uzhe est")
+                else:
+                    print(f"[WARN] is_admin SQLite: {type(e).__name__}: {e}")
+        if "postgresql" in db_url:
             # tenant_id в leads (nullable)
             try:
                 await conn.execute(text(

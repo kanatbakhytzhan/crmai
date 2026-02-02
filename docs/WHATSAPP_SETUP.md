@@ -36,7 +36,12 @@ curl -i -X PATCH "http://localhost:8000/api/admin/tenants/1" \
 ## Webhook Meta
 
 - `GET /api/whatsapp/webhook` — верификация: `hub.mode`, `hub.verify_token`, `hub.challenge`. Токен сверяется с `WHATSAPP_VERIFY_TOKEN` или с `whatsapp_accounts.verify_token`.
-- `POST /api/whatsapp/webhook` — приём сообщений. По `phone_number_id` из payload находится tenant, создаётся lead с `owner_id = tenant.default_owner_user_id` (или первый пользователь с предупреждением в лог) и текстом сообщения. Если у tenant **ai_enabled=false**, входящие сохраняются, автоответ не отправляется. В чате: текст **/stop** или **stop** — выключить AI для этого tenant; **/start** или **start** — включить AI (ответ «AI-менеджер выключен/включен ✅»).
+- `POST /api/whatsapp/webhook` — приём сообщений. По `phone_number_id` из payload находится tenant, создаётся lead, сообщение сохраняется в историю. Если у tenant **ai_enabled=false** или чат/номер в mute — автоответ не отправляется (лиды и контекст сохраняются). **Команды в чате (текст, регистр не важен):**
+  - **/stop** или **stop** — отключить автоответ только в этом чате. Ответ: «Ок. Я отключил автоответ в этом чате. Лиды будут сохраняться.»
+  - **/start** или **start** — включить автоответ в этом чате. Ответ: «Ок. Автоответ в этом чате снова включён.»
+  - **/stop all** или **stop all** — отключить автоответ для всех чатов этого бизнес-номера. Ответ: «Ок. Я отключил автоответ для всех чатов этого номера.»
+  - **/start all** или **start all** — включить автоответ для всех чатов этого номера. Ответ: «Ок. Автоответ для всех чатов снова включён.»
+- Таблица **chat_mutes** хранит настройки mute по (channel, phone_number_id, scope, external_id): scope=**chat** — один чат, scope=**all** — все чаты номера.
 
 ## Проверка локально (curl)
 

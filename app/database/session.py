@@ -173,6 +173,28 @@ async def init_db():
                 print("[OK] Tablica tenant_users proverena/sozdana")
             except Exception as e:
                 print(f"[WARN] tenant_users create: {type(e).__name__}: {e}")
+            # chat_mutes: per-chat и global mute для WhatsApp/ChatFlow
+            try:
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS chat_mutes (
+                        id SERIAL PRIMARY KEY,
+                        tenant_id INTEGER REFERENCES tenants(id),
+                        channel VARCHAR(64) NOT NULL,
+                        phone_number_id VARCHAR(255),
+                        external_id VARCHAR(255) NOT NULL,
+                        scope VARCHAR(32) NOT NULL,
+                        is_muted BOOLEAN NOT NULL DEFAULT TRUE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(channel, phone_number_id, scope, external_id)
+                    )
+                """))
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_chat_mutes_channel_phone ON chat_mutes(channel, phone_number_id)"
+                ))
+                print("[OK] Tablica chat_mutes proverena/sozdana")
+            except Exception as e:
+                print(f"[WARN] chat_mutes create: {type(e).__name__}: {e}")
     print("[OK] Baza dannyh initializirovana")
 
 

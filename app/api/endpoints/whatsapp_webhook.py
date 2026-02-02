@@ -55,6 +55,26 @@ def _qp(request: Request, *keys: str) -> str | None:
     return None
 
 
+def _parse_mute_command(text: str) -> str | None:
+    """
+    Команды: /stop, /start, /stop all, /start all (регистр не важен, пробелы схлопнуть).
+    Возвращает: "stop" | "start" | "stop_all" | "start_all" | None.
+    """
+    raw = (text or "").strip().lower()
+    raw = " ".join(raw.split())
+    if not raw:
+        return None
+    if raw in ("/stop", "stop"):
+        return "stop"
+    if raw in ("/start", "start"):
+        return "start"
+    if raw in ("/stop all", "stop all"):
+        return "stop_all"
+    if raw in ("/start all", "start all"):
+        return "start_all"
+    return None
+
+
 @router.get("/webhook")
 async def webhook_verify(request: Request):
     """
@@ -126,30 +146,37 @@ async def webhook_post(
                 await conversation_service.append_user_message(db, conv.id, text, raw_json=msg)
                 log.info(f"[WA][CHAT] conv_id={conv.id} tenant_id={tenant_id} from={from_wa_id} stored user msg")
 
-                # Команды /stop и /start (только текст, регистр не важен). MVP: любой отправитель в чате tenant.
-                cmd_raw = (text or "").strip().lower()
-                cmd = "none"
-                if cmd_raw in ("/stop", "stop"):
-                    cmd = "stop"
-                elif cmd_raw in ("/start", "start"):
-                    cmd = "start"
-                log.info("[AI] tenant=%s ai_enabled=%s cmd=%s", tenant_id, ai_enabled, cmd)
-
-                if cmd == "stop":
-                    await crud.update_tenant(db, tenant_id, ai_enabled=False)
-                    await whatsapp_cloud_api.send_text_message(
-                        phone_number_id_str, from_wa_id, "AI-менеджер выключен ✅ Команда применена для этого аккаунта."
-                    )
+                # Команды mute: /stop, /start, /stop all, /start all (только текст)
+                mute_cmd = _parse_mute_command(text)
+                if mute_cmd:
+                    channel = "whatsapp"
+                    if mute_cmd == "stop":
+                        await crud.set_chat_muted(db, channel, phone_number_id_str, from_wa_id, True, tenant_id=tenant_id)
+                        log.info("[MUTE] chat set muted=true channel=%s phone_number_id=%s external_id=%s", channel, phone_number_id_str, from_wa_id)
+                        reply = "Ок. Я отключил автоответ в этом чате. Лиды будут сохраняться."
+                    elif mute_cmd == "start":
+                        await crud.set_chat_muted(db, channel, phone_number_id_str, from_wa_id, False, tenant_id=tenant_id)
+                        log.info("[MUTE] chat set muted=false channel=%s phone_number_id=%s external_id=%s", channel, phone_number_id_str, from_wa_id)
+                        reply = "Ок. Автоответ в этом чате снова включён."
+                    elif mute_cmd == "stop_all":
+                        await crud.set_all_muted(db, channel, phone_number_id_str, True, tenant_id=tenant_id)
+                        log.info("[MUTE] all set muted=true channel=%s phone_number_id=%s", channel, phone_number_id_str)
+                        reply = "Ок. Я отключил автоответ для всех чатов этого номера."
+                    else:
+                        await crud.set_all_muted(db, channel, phone_number_id_str, False, tenant_id=tenant_id)
+                        log.info("[MUTE] all set muted=false channel=%s phone_number_id=%s", channel, phone_number_id_str)
+                        reply = "Ок. Автоответ для всех чатов снова включён."
+                    send_result = await whatsapp_cloud_api.send_text_message(phone_number_id_str, from_wa_id, reply)
+                    if send_result.get("skipped"):
+                        log.info("[WA][SEND] skipped %s", send_result.get("reason", "unknown"))
                     continue
-                if cmd == "start":
-                    await crud.update_tenant(db, tenant_id, ai_enabled=True)
-                    await whatsapp_cloud_api.send_text_message(
-                        phone_number_id_str, from_wa_id, "AI-менеджер включен ✅ Команда применена для этого аккаунта."
-                    )
-                    continue
 
+                muted = await crud.is_muted(db, "whatsapp", phone_number_id_str, from_wa_id)
+                if muted:
+                    log.info("[MUTE] is_muted=true scope=all|chat channel=whatsapp phone_number_id=%s external_id=%s", phone_number_id_str, from_wa_id)
                 if not ai_enabled:
-                    # Входящие сохраняем, автоответ не отправляем
+                    continue
+                if muted:
                     continue
 
                 messages_for_gpt = await conversation_service.build_context_messages(db, conv.id, limit=20)

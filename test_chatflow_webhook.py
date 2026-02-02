@@ -1,10 +1,10 @@
 """
 Unit-тесты парсинга payload ChatFlow webhook (remoteJid, messageId, messageType, message),
-команд /stop /start и логики ai_enabled.
+команд mute: /stop, /start, /stop all, /start all.
 Запуск: python test_chatflow_webhook.py
        или: python -m pytest test_chatflow_webhook.py -v
 """
-from app.api.endpoints.chatflow_webhook import parse_incoming_payload, _detect_command
+from app.api.endpoints.chatflow_webhook import parse_incoming_payload, _parse_mute_command
 
 
 def test_parse_text_payload():
@@ -62,30 +62,43 @@ def test_parse_message_as_dict():
     assert text == "Привет"
 
 
-# --- Команды /stop /start и ai_enabled ---
+# --- Команды mute: /stop, /start, /stop all, /start all ---
 
-def test_detect_command_stop():
+def test_parse_mute_command_stop():
     """Команда stop: /stop или stop, регистр не важен."""
-    assert _detect_command("/stop") == "stop"
-    assert _detect_command("stop") == "stop"
-    assert _detect_command("  STOP  ") == "stop"
-    assert _detect_command("/STOP") == "stop"
+    assert _parse_mute_command("/stop") == "stop"
+    assert _parse_mute_command("stop") == "stop"
+    assert _parse_mute_command("  STOP  ") == "stop"
+    assert _parse_mute_command("/STOP") == "stop"
 
 
-def test_detect_command_start():
+def test_parse_mute_command_start():
     """Команда start: /start или start."""
-    assert _detect_command("/start") == "start"
-    assert _detect_command("start") == "start"
-    assert _detect_command("  Start  ") == "start"
+    assert _parse_mute_command("/start") == "start"
+    assert _parse_mute_command("start") == "start"
+    assert _parse_mute_command("  Start  ") == "start"
 
 
-def test_detect_command_none():
+def test_parse_mute_command_stop_all():
+    """Команда /stop all или stop all."""
+    assert _parse_mute_command("/stop all") == "stop_all"
+    assert _parse_mute_command("stop all") == "stop_all"
+    assert _parse_mute_command("  /stop   all  ") == "stop_all"
+
+
+def test_parse_mute_command_start_all():
+    """Команда /start all или start all."""
+    assert _parse_mute_command("/start all") == "start_all"
+    assert _parse_mute_command("start all") == "start_all"
+
+
+def test_parse_mute_command_none():
     """Не команда — обычный текст."""
-    assert _detect_command("привет") == "none"
-    assert _detect_command("stop please") == "none"
-    assert _detect_command("") == "none"
-    assert _detect_command("   ") == "none"
-    assert _detect_command(None) == "none"
+    assert _parse_mute_command("привет") is None
+    assert _parse_mute_command("stop please") is None
+    assert _parse_mute_command("") is None
+    assert _parse_mute_command("   ") is None
+    assert _parse_mute_command(None) is None
 
 
 if __name__ == "__main__":
@@ -93,7 +106,9 @@ if __name__ == "__main__":
     test_parse_voice_payload()
     test_parse_empty_or_invalid()
     test_parse_message_as_dict()
-    test_detect_command_stop()
-    test_detect_command_start()
-    test_detect_command_none()
-    print("All parse payload and command tests passed.")
+    test_parse_mute_command_stop()
+    test_parse_mute_command_start()
+    test_parse_mute_command_stop_all()
+    test_parse_mute_command_start_all()
+    test_parse_mute_command_none()
+    print("All parse payload and mute command tests passed.")

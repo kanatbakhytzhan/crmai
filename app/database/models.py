@@ -193,3 +193,27 @@ class LeadComment(Base):
 
     lead = relationship("Lead", back_populates="comments")
     user = relationship("User", backref="lead_comments")
+
+
+class ChatMute(Base):
+    """
+    Mute автоответа AI: по чату (scope=chat) или по всем чатам номера (scope=all).
+    UNIQUE(channel, phone_number_id, scope, external_id): для scope=all храним external_id=''.
+    """
+    __tablename__ = "chat_mutes"
+    __table_args__ = (
+        UniqueConstraint(
+            "channel", "phone_number_id", "scope", "external_id",
+            name="uq_chat_mute_channel_phone_scope_external",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True)
+    channel = Column(String(64), nullable=False)  # whatsapp, chatflow
+    phone_number_id = Column(String(255), nullable=True)  # бизнес-номер; для ChatFlow может быть ""
+    external_id = Column(String(255), nullable=False)  # jid/from; для scope=all — ""
+    scope = Column(String(32), nullable=False)  # "chat" | "all"
+    is_muted = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

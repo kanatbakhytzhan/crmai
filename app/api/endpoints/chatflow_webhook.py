@@ -46,14 +46,24 @@ EXTRA_SYSTEM_CONTEXT = (
 PHONE_REGEX = re.compile(r"^\+?[\d\s\-()]{10,15}$")
 
 
-def _detect_command(text: str) -> str:
-    """Определить команду по тексту: 'stop' | 'start' | 'none'. Регистр не важен."""
+def _parse_mute_command(text: str) -> str | None:
+    """
+    Команды: /stop, /start, /stop all, /start all (регистр не важен, пробелы схлопнуть).
+    Возвращает: "stop" | "start" | "stop_all" | "start_all" | None.
+    """
     raw = (text or "").strip().lower()
+    raw = " ".join(raw.split())
+    if not raw:
+        return None
     if raw in ("/stop", "stop"):
         return "stop"
     if raw in ("/start", "start"):
         return "start"
-    return "none"
+    if raw in ("/stop all", "stop all"):
+        return "stop_all"
+    if raw in ("/start all", "start all"):
+        return "start_all"
+    return None
 
 
 def _normalize_phone(text: str) -> str | None:
@@ -294,30 +304,41 @@ async def chatflow_webhook_post(request: Request, db: AsyncSession = Depends(get
         except Exception as e:
             log.warning("[CHATFLOW] update lead phone: %s", type(e).__name__)
 
-    # Tenant для ChatFlow: первый активный (ai_enabled, команды /stop /start)
+    # Tenant для ChatFlow: первый активный (ai_enabled, tenant_id для mute)
     tenant = await _get_chatflow_tenant(db)
     tenant_id = tenant.id if tenant else None
     ai_enabled = getattr(tenant, "ai_enabled", True) if tenant else True
+    channel_cf = "chatflow"
+    phone_number_id_cf = ""  # один инстанс ChatFlow — mute общий по external_id (remote_jid)
 
-    # Команды /stop и /start (текст, регистр не важен). MVP: любой отправитель.
-    cmd = _detect_command(user_text or "")
-    log.info("[AI] tenant=%s ai_enabled=%s cmd=%s", tenant_id, ai_enabled, cmd)
-
-    if cmd == "stop" and tenant:
-        await crud.update_tenant(db, tenant_id, ai_enabled=False)
-        await _send_reply_and_return_ok(
-            remote_jid, "AI-менеджер выключен ✅ Команда применена для этого аккаунта."
-        )
+    # Команды mute: /stop, /start, /stop all, /start all
+    mute_cmd = _parse_mute_command(user_text or "")
+    if mute_cmd:
+        if mute_cmd == "stop":
+            await crud.set_chat_muted(db, channel_cf, phone_number_id_cf, remote_jid, True, tenant_id=tenant_id)
+            log.info("[MUTE] chat set muted=true channel=%s phone_number_id=%s external_id=%s", channel_cf, phone_number_id_cf, remote_jid)
+            reply = "Ок. Я отключил автоответ в этом чате. Лиды будут сохраняться."
+        elif mute_cmd == "start":
+            await crud.set_chat_muted(db, channel_cf, phone_number_id_cf, remote_jid, False, tenant_id=tenant_id)
+            log.info("[MUTE] chat set muted=false channel=%s phone_number_id=%s external_id=%s", channel_cf, phone_number_id_cf, remote_jid)
+            reply = "Ок. Автоответ в этом чате снова включён."
+        elif mute_cmd == "stop_all":
+            await crud.set_all_muted(db, channel_cf, phone_number_id_cf, True, tenant_id=tenant_id)
+            log.info("[MUTE] all set muted=true channel=%s phone_number_id=%s", channel_cf, phone_number_id_cf)
+            reply = "Ок. Я отключил автоответ для всех чатов этого номера."
+        else:
+            await crud.set_all_muted(db, channel_cf, phone_number_id_cf, False, tenant_id=tenant_id)
+            log.info("[MUTE] all set muted=false channel=%s phone_number_id=%s", channel_cf, phone_number_id_cf)
+            reply = "Ок. Автоответ для всех чатов снова включён."
+        await _send_reply_and_return_ok(remote_jid, reply)
         return {"ok": True}
-    if cmd == "start" and tenant:
-        await crud.update_tenant(db, tenant_id, ai_enabled=True)
-        await _send_reply_and_return_ok(
-            remote_jid, "AI-менеджер включен ✅ Команда применена для этого аккаунта."
-        )
-        return {"ok": True}
 
+    muted = await crud.is_muted(db, channel_cf, phone_number_id_cf, remote_jid)
+    if muted:
+        log.info("[MUTE] is_muted=true scope=all|chat channel=%s phone_number_id=%s external_id=%s", channel_cf, phone_number_id_cf, remote_jid)
     if not ai_enabled:
-        # Входящие уже сохранены, автоответ не отправляем
+        return {"ok": True}
+    if muted:
         return {"ok": True}
 
     messages_for_gpt = await conversation_service.build_context_messages(db, conv.id, limit=CONTEXT_LIMIT)

@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     
     # Админка: emails, которые считаются админами (без is_admin в БД). Формат: "email1,email2"
     admin_emails: Optional[str] = None
+    # Аварийное восстановление: секрет для POST /api/admin/recovery/enable-user (без логина). Задать на Render.
+    admin_recovery_key: Optional[str] = None
     
     # CORS: разрешённые origins для CRM/админки. Формат: "http://localhost:5173,https://my-pwa.com"
     # На Render задайте CORS_ORIGINS с вашим прод-доменом PWA.

@@ -61,6 +61,15 @@ async def get_all_users(db: AsyncSession, limit: int = 500) -> List[User]:
     return list(result.scalars().all())
 
 
+async def count_active_admins(db: AsyncSession, exclude_user_id: Optional[int] = None) -> int:
+    """Количество активных админов (is_active=True, is_admin=True). exclude_user_id — не учитывать этого пользователя."""
+    q = select(User).where(User.is_active == True).where(User.is_admin == True)
+    if exclude_user_id is not None:
+        q = q.where(User.id != exclude_user_id)
+    result = await db.execute(q)
+    return len(list(result.scalars().all()))
+
+
 async def update_user(
     db: AsyncSession,
     user_id: int,

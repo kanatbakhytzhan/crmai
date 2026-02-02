@@ -81,7 +81,27 @@ async def update_user(
     """
     Обновить пользователя (is_active, company_name, is_admin).
     404 если пользователь не найден.
+    Защита: нельзя деактивировать себя и нельзя деактивировать последнего активного админа.
     """
+    existing = await crud.get_user_by_id(db, user_id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+    if body.is_active is False:
+        if current_user.id == user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="You cannot disable your own account",
+            )
+        if getattr(existing, "is_admin", False) and existing.is_active:
+            other_admins = await crud.count_active_admins(db, exclude_user_id=user_id)
+            if other_admins == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot disable the last active admin",
+                )
     user = await crud.update_user(
         db,
         user_id,
@@ -89,11 +109,6 @@ async def update_user(
         company_name=body.company_name,
         is_admin=body.is_admin,
     )
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
     return _user_to_admin_list(user)
 
 

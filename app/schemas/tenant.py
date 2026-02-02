@@ -45,6 +45,17 @@ class AISettingsUpdate(BaseModel):
     ai_prompt: Optional[str] = None
 
 
+class MeAISettingsResponse(BaseModel):
+    """GET /api/me/ai-settings"""
+    tenant_id: int
+    ai_enabled: bool
+
+
+class MeAISettingsUpdate(BaseModel):
+    """PATCH /api/me/ai-settings"""
+    ai_enabled: Optional[bool] = None
+
+
 class WhatsAppAccountCreate(BaseModel):
     phone_number: str
     phone_number_id: str

@@ -523,6 +523,33 @@ async def list_tenants(db: AsyncSession, active_only: bool = False) -> List[Tena
     return list(result.scalars().all())
 
 
+async def get_tenant_for_me(db: AsyncSession, user_id: int) -> Optional[Tenant]:
+    """
+    Tenant для текущего пользователя (GET/PATCH /api/me/ai-settings).
+    Сначала первый активный tenant из tenant_users; иначе tenant где default_owner_user_id == user_id.
+    """
+    # 1) tenant_users: первый активный tenant
+    tenant_ids = await get_tenant_ids_for_user(db, user_id)
+    if tenant_ids:
+        result = await db.execute(
+            select(Tenant)
+            .where(Tenant.id == tenant_ids[0])
+            .where(Tenant.is_active == True)
+        )
+        t = result.scalar_one_or_none()
+        if t:
+            return t
+    # 2) fallback: tenant где default_owner_user_id == current_user.id
+    result = await db.execute(
+        select(Tenant)
+        .where(Tenant.default_owner_user_id == user_id)
+        .where(Tenant.is_active == True)
+        .order_by(Tenant.id.asc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 # ========== WHATSAPP ACCOUNT ==========
 
 async def create_whatsapp_account(
@@ -767,13 +794,16 @@ async def set_chat_muted(
     channel = (channel or "whatsapp").strip().lower()
     phone_number_id = _norm_phone_id(phone_number_id)
     external_id = _norm_external_id(external_id)
-    result = await db.execute(
+    q = (
         select(ChatMute)
         .where(ChatMute.channel == channel)
         .where(ChatMute.phone_number_id == phone_number_id)
         .where(ChatMute.scope == "chat")
         .where(ChatMute.external_id == external_id)
     )
+    if tenant_id is not None:
+        q = q.where(ChatMute.tenant_id == tenant_id)
+    result = await db.execute(q)
     row = result.scalar_one_or_none()
     if row:
         row.is_muted = muted
@@ -863,6 +893,86 @@ async def is_muted(
     # 2) Проверить scope=chat для этого external_id
     result = await db.execute(
         select(ChatMute)
+        .where(ChatMute.channel == channel)
+        .where(ChatMute.phone_number_id == phone_number_id)
+        .where(ChatMute.scope == "chat")
+        .where(ChatMute.external_id == external_id)
+    )
+    row = result.scalar_one_or_none()
+    if row and row.is_muted:
+        return True
+
+    return False
+
+
+async def get_chat_mute(
+    db: AsyncSession,
+    tenant_id: int,
+    channel: str,
+    phone_number_id: str,
+    external_id: str,
+) -> Optional[ChatMute]:
+    """Найти запись mute для одного чата (scope=chat, tenant_id)."""
+    channel = (channel or "whatsapp").strip().lower()
+    phone_number_id = _norm_phone_id(phone_number_id)
+    external_id = _norm_external_id(external_id)
+    result = await db.execute(
+        select(ChatMute)
+        .where(ChatMute.tenant_id == tenant_id)
+        .where(ChatMute.channel == channel)
+        .where(ChatMute.phone_number_id == phone_number_id)
+        .where(ChatMute.scope == "chat")
+        .where(ChatMute.external_id == external_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def set_chat_mute(
+    db: AsyncSession,
+    tenant_id: int,
+    channel: str,
+    phone_number_id: str,
+    external_id: str,
+    is_muted: bool,
+) -> ChatMute:
+    """Upsert mute для одного чата (scope=chat) с обязательным tenant_id."""
+    return await set_chat_muted(
+        db, channel, phone_number_id, external_id, is_muted, tenant_id=tenant_id
+    )
+
+
+async def is_chat_muted(
+    db: AsyncSession,
+    tenant_id: int,
+    channel: str,
+    phone_number_id: str,
+    external_id: str,
+) -> bool:
+    """
+    Mute только для этого чата в рамках tenant.
+    Сначала scope=all для этого (tenant_id, channel, phone_number_id), затем scope=chat.
+    """
+    channel = (channel or "whatsapp").strip().lower()
+    phone_number_id = _norm_phone_id(phone_number_id)
+    external_id = _norm_external_id(external_id)
+
+    # 1) scope=all для этого tenant
+    result = await db.execute(
+        select(ChatMute)
+        .where(ChatMute.tenant_id == tenant_id)
+        .where(ChatMute.channel == channel)
+        .where(ChatMute.phone_number_id == phone_number_id)
+        .where(ChatMute.scope == "all")
+        .where(ChatMute.external_id == "")
+    )
+    row = result.scalar_one_or_none()
+    if row and row.is_muted:
+        return True
+
+    # 2) scope=chat для этого чата
+    result = await db.execute(
+        select(ChatMute)
+        .where(ChatMute.tenant_id == tenant_id)
         .where(ChatMute.channel == channel)
         .where(ChatMute.phone_number_id == phone_number_id)
         .where(ChatMute.scope == "chat")

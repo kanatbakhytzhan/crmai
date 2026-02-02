@@ -311,34 +311,41 @@ async def chatflow_webhook_post(request: Request, db: AsyncSession = Depends(get
     channel_cf = "chatflow"
     phone_number_id_cf = ""  # один инстанс ChatFlow — mute общий по external_id (remote_jid)
 
-    # Команды mute: /stop, /start, /stop all, /start all
+    # Команды /stop и /start — только этот чат (локальный переключатель)
     mute_cmd = _parse_mute_command(user_text or "")
-    if mute_cmd:
-        if mute_cmd == "stop":
-            await crud.set_chat_muted(db, channel_cf, phone_number_id_cf, remote_jid, True, tenant_id=tenant_id)
-            log.info("[MUTE] chat set muted=true channel=%s phone_number_id=%s external_id=%s", channel_cf, phone_number_id_cf, remote_jid)
-            reply = "Ок. Я отключил автоответ в этом чате. Лиды будут сохраняться."
-        elif mute_cmd == "start":
-            await crud.set_chat_muted(db, channel_cf, phone_number_id_cf, remote_jid, False, tenant_id=tenant_id)
-            log.info("[MUTE] chat set muted=false channel=%s phone_number_id=%s external_id=%s", channel_cf, phone_number_id_cf, remote_jid)
-            reply = "Ок. Автоответ в этом чате снова включён."
-        elif mute_cmd == "stop_all":
+    if mute_cmd and tenant_id is not None:
+        if mute_cmd in ("stop", "start"):
+            if mute_cmd == "stop":
+                await crud.set_chat_mute(db, tenant_id, channel_cf, phone_number_id_cf, remote_jid, is_muted=True)
+                log.info("[MUTE] chat set muted=true channel=%s phone_number_id=%s external_id=%s", channel_cf, phone_number_id_cf, remote_jid)
+                reply = "✅ Ок. Я отключил автоответ AI в этом чате. Лиды продолжат сохраняться."
+            else:
+                await crud.set_chat_mute(db, tenant_id, channel_cf, phone_number_id_cf, remote_jid, is_muted=False)
+                log.info("[MUTE] chat set muted=false channel=%s phone_number_id=%s external_id=%s", channel_cf, phone_number_id_cf, remote_jid)
+                reply = "✅ Ок. Автоответ AI снова включён в этом чате."
+            await _send_reply_and_return_ok(remote_jid, reply)
+            return {"ok": True}
+        if mute_cmd == "stop_all":
             await crud.set_all_muted(db, channel_cf, phone_number_id_cf, True, tenant_id=tenant_id)
             log.info("[MUTE] all set muted=true channel=%s phone_number_id=%s", channel_cf, phone_number_id_cf)
-            reply = "Ок. Я отключил автоответ для всех чатов этого номера."
-        else:
+            await _send_reply_and_return_ok(remote_jid, "Ок. Я отключил автоответ для всех чатов этого номера.")
+            return {"ok": True}
+        if mute_cmd == "start_all":
             await crud.set_all_muted(db, channel_cf, phone_number_id_cf, False, tenant_id=tenant_id)
             log.info("[MUTE] all set muted=false channel=%s phone_number_id=%s", channel_cf, phone_number_id_cf)
-            reply = "Ок. Автоответ для всех чатов снова включён."
-        await _send_reply_and_return_ok(remote_jid, reply)
-        return {"ok": True}
+            await _send_reply_and_return_ok(remote_jid, "Ок. Автоответ для всех чатов снова включён.")
+            return {"ok": True}
 
-    muted = await crud.is_muted(db, channel_cf, phone_number_id_cf, remote_jid)
-    if muted:
-        log.info("[MUTE] is_muted=true scope=all|chat channel=%s phone_number_id=%s external_id=%s", channel_cf, phone_number_id_cf, remote_jid)
-    if not ai_enabled:
+    # AI отвечает только если tenant.ai_enabled и не chat_muted
+    if tenant_id is None:
+        log.info("[AI] skipped reply tenant=None reason=no_tenant")
         return {"ok": True}
-    if muted:
+    chat_muted = await crud.is_chat_muted(db, tenant_id, channel_cf, phone_number_id_cf, remote_jid)
+    if not ai_enabled:
+        log.info("[AI] skipped reply tenant=%s reason=tenant_disabled", tenant_id)
+        return {"ok": True}
+    if chat_muted:
+        log.info("[AI] skipped reply tenant=%s reason=chat_muted", tenant_id)
         return {"ok": True}
 
     messages_for_gpt = await conversation_service.build_context_messages(db, conv.id, limit=CONTEXT_LIMIT)

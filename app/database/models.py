@@ -30,17 +30,21 @@ class Tenant(Base):
 
 
 class TenantUser(Base):
-    """Связка пользователя с tenant (multi-user в одном tenant)."""
+    """Связка пользователя с tenant (multi-user в одном tenant). CRM v2.5: owner→rop→manager."""
     __tablename__ = "tenant_users"
+    __table_args__ = (UniqueConstraint("tenant_id", "user_id", name="uq_tenant_users_tenant_user"),)
 
     id = Column(Integer, primary_key=True, index=True)
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    role = Column(String(50), default="member", nullable=True)  # owner, admin, member
+    role = Column(String(50), default="member", nullable=True)  # owner, rop, manager, admin, member
+    parent_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # для manager: user_id ROP
+    is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     tenant = relationship("Tenant", back_populates="tenant_users")
-    user = relationship("User", backref="tenant_users")
+    user = relationship("User", backref="tenant_users", foreign_keys=[user_id])
+    parent = relationship("User", foreign_keys=[parent_user_id])
 
 
 class WhatsAppAccount(Base):
@@ -290,6 +294,48 @@ class LeadTask(Base):
 
     lead = relationship("Lead", back_populates="tasks")
     assigned_user = relationship("User", backref="lead_tasks")
+
+
+class AIChatMute(Base):
+    """Per-chat mute по chat_key (remoteJid или phone:...). Устраняет зависимость от lead.tenant_id."""
+    __tablename__ = "ai_chat_mutes"
+    __table_args__ = (UniqueConstraint("tenant_id", "chat_key", name="uq_ai_chat_mutes_tenant_chat_key"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=True)
+    chat_key = Column(String(512), nullable=False, index=True)  # remoteJid или "phone:..."
+    is_muted = Column(Boolean, default=True, nullable=False)
+    muted_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    muted_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AuditLog(Base):
+    """Аудит: bulk assign, stage changes, mute, tenant settings."""
+    __tablename__ = "audit_log"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True)
+    actor_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    action = Column(String(128), nullable=False)
+    payload_json = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Notification(Base):
+    """In-app уведомления (lead_created, assigned_to, ...)."""
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    type = Column(String(64), nullable=False)
+    title = Column(String(255), nullable=True)
+    body = Column(Text, nullable=True)
+    is_read = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=True)
 
 
 class ChatMute(Base):

@@ -17,10 +17,13 @@ from app.schemas.lead import (
     LeadCommentCreate,
     LeadCommentResponse,
     AIMuteUpdate,
+    AIChatMuteBody,
     LeadAssignBody,
     LeadBulkAssignBody,
     LeadPatchBody,
     LeadStageBody,
+    LeadSelectionBody,
+    LeadAssignPlanBody,
 )
 from app.services import openai_service, telegram_service, conversation_service
 from app.services.events_bus import emit as events_emit
@@ -395,6 +398,11 @@ async def assign_lead(
         await events_emit("lead_updated", {"lead_id": updated.id, "tenant_id": getattr(updated, "tenant_id", None)})
     except Exception:
         pass
+    if assigned_id:
+        try:
+            await crud.notification_create(db, user_id=assigned_id, type="lead_assigned", title="Лид назначен", body=f"Вам назначен лид #{updated.id}", tenant_id=getattr(updated, "tenant_id", None), lead_id=updated.id)
+        except Exception:
+            pass
     return {"ok": True, "lead": out}
 
 
@@ -456,6 +464,51 @@ async def update_lead_stage(
     except Exception:
         pass
     return {"ok": True, "lead": out}
+
+
+@router.post("/leads/selection", response_model=dict)
+async def leads_selection(
+    body: LeadSelectionBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    CRM v2.5: отбор лидов по фильтрам. Возвращает lead_ids и total для последующего assign/plan.
+    """
+    multitenant = (getattr(get_settings(), "multitenant_enabled", "false") or "false").upper() == "TRUE"
+    filters = (body.filters.model_dump() if body.filters else {}) or {}
+    lead_ids, total = await crud.leads_selection(
+        db, current_user.id, filters, sort=body.sort, direction=body.direction, limit=min(body.limit, 500)
+    )
+    return {"ok": True, "lead_ids": lead_ids, "total": total}
+
+
+@router.post("/leads/assign/plan", response_model=dict)
+async def assign_plan(
+    body: LeadAssignPlanBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    CRM v2.5: гибкое распределение по плану (by_ranges). dry_run — только preview.
+    Индексы 1-based. owner/rop.
+    """
+    from app.database.models import LeadStatus
+    multitenant = (getattr(get_settings(), "multitenant_enabled", "false") or "false").upper() == "TRUE"
+    status_map = {"new": LeadStatus.NEW, "in_progress": LeadStatus.IN_PROGRESS, "done": LeadStatus.DONE, "cancelled": LeadStatus.CANCELLED}
+    set_status = status_map.get((body.set_status or "").strip().lower()) if body.set_status else None
+    plans_raw = [p.model_dump() for p in body.plans]
+    preview, assigned_count, errors = await crud.assign_plan_execute(
+        db, body.lead_ids, plans_raw, body.mode, current_user.id, set_status=set_status, dry_run=body.dry_run
+    )
+    if body.dry_run:
+        return {"ok": True, "preview": preview or [], "errors": errors or []}
+    if assigned_count is not None and assigned_count > 0:
+        await crud.audit_log_append(
+            db, actor_user_id=current_user.id, action="bulk_assign_plan",
+            tenant_id=None, payload={"assigned": assigned_count, "lead_ids": body.lead_ids[:10], "plans": plans_raw[:5]}
+        )
+    return {"ok": True, "assigned": assigned_count or 0, "errors": errors or []}
 
 
 @router.post("/leads/assign/bulk", response_model=dict)
@@ -549,9 +602,8 @@ async def post_lead_ai_mute(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Включить/выключить AI в чате лида (per-chat mute). Upsert в chat_ai_states по (tenant_id, remote_jid).
-    body: { "muted": true/false }. remote_jid = lead.bot_user.user_id.
-    Требует JWT. Доступ: владелец лида или пользователь tenant.
+    Включить/выключить AI в чате лида (per-chat mute). Запись в ai_chat_mutes по chat_key (remote_jid).
+    CRM v2.5: если lead.tenant_id null — определяем по me.tenant_id или owner→tenant_users; иначе 409.
     """
     multitenant = (getattr(get_settings(), "multitenant_enabled", "false") or "false").upper() == "TRUE"
     lead = await crud.get_lead_by_id(db, lead_id, current_user.id, multitenant_include_tenant_leads=multitenant)
@@ -568,19 +620,50 @@ async def post_lead_ai_mute(
             await db.refresh(lead)
             tenant_id = resolved
         else:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "detail": "Lead has no tenant_id",
-                    "hint": "Run admin fix-leads-tenant or re-create lead through tenant-bound webhook",
-                    "lead_id": lead_id,
-                    "remoteJid": remote_jid or None,
-                },
-            )
+            # CRM v2.5: попытка по текущему пользователю (me.tenant_id)
+            me_tenant = await crud.get_tenant_for_me(db, current_user.id)
+            if me_tenant:
+                tenant_id = me_tenant.id
+                lead.tenant_id = tenant_id
+                await db.commit()
+                await db.refresh(lead)
+            else:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "detail": "cannot_resolve_tenant",
+                        "reason": "Lead has no tenant_id and current user has no tenant. Run admin fix-leads-tenant or re-create lead through tenant-bound webhook.",
+                        "lead_id": lead_id,
+                        "remoteJid": remote_jid or None,
+                    },
+                )
     if not remote_jid:
         raise HTTPException(status_code=400, detail="Lead has no remote_jid (bot_user.user_id)")
+    chat_key = remote_jid
+    await crud.set_ai_chat_mute(db, tenant_id=tenant_id, chat_key=chat_key, is_muted=body.muted, lead_id=lead_id, muted_by_user_id=current_user.id)
     await crud.set_chat_ai_state(db, tenant_id, remote_jid, enabled=not body.muted)
     return {"ok": True, "muted": body.muted}
+
+
+@router.post("/ai/mute", response_model=dict)
+async def post_ai_mute_by_chat_key(
+    body: AIChatMuteBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    CRM v2.5: mute по chat_key (для /stop /start из CRM без привязки к lead).
+    tenant_id берётся из текущего пользователя (me.tenant_id).
+    """
+    tenant = await crud.get_tenant_for_me(db, current_user.id)
+    if not tenant:
+        raise HTTPException(status_code=409, detail="cannot_resolve_tenant: current user has no tenant")
+    chat_key = (body.chat_key or "").strip()
+    if not chat_key:
+        raise HTTPException(status_code=400, detail="chat_key is required")
+    await crud.set_ai_chat_mute(db, tenant_id=tenant.id, chat_key=chat_key, is_muted=body.muted, muted_by_user_id=current_user.id)
+    await crud.set_chat_ai_state(db, tenant.id, chat_key, enabled=not body.muted)
+    return {"ok": True, "muted": body.muted, "chat_key": chat_key}
 
 
 @router.get("/leads/{lead_id}/comments", response_model=dict)

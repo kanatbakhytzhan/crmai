@@ -270,6 +270,19 @@ async def init_db():
                 print("[OK] Tablica tenant_users proverena/sozdana")
             except Exception as e:
                 print(f"[WARN] tenant_users create: {type(e).__name__}: {e}")
+            # CRM v2.5: tenant_users.parent_user_id, is_active
+            for col, defn in [
+                ("parent_user_id", "INTEGER REFERENCES users(id)"),
+                ("is_active", "BOOLEAN NOT NULL DEFAULT TRUE"),
+            ]:
+                try:
+                    await conn.execute(text(f"ALTER TABLE tenant_users ADD COLUMN {col} {defn}"))
+                    print(f"[OK] tenant_users.{col} dobavlena")
+                except Exception as e:
+                    if "already exists" in str(e).lower() or "duplicate" in str(e).lower():
+                        print(f"[OK] tenant_users.{col} uzhe est")
+                    else:
+                        print(f"[WARN] tenant_users.{col}: {type(e).__name__}: {e}")
             # chat_mutes: per-chat и global mute для WhatsApp/ChatFlow
             try:
                 await conn.execute(text("""
@@ -414,6 +427,50 @@ async def init_db():
                 print("[OK] Tablicy pipelines, pipeline_stages, lead_tasks i kolonki leads provereny")
             except Exception as e:
                 print(f"[WARN] pipelines/tasks migration: {type(e).__name__}: {e}")
+            # CRM v2.5: ai_chat_mutes, audit_log, notifications
+            try:
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS ai_chat_mutes (
+                        id SERIAL PRIMARY KEY,
+                        tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                        lead_id INTEGER REFERENCES leads(id),
+                        chat_key VARCHAR(512) NOT NULL,
+                        is_muted BOOLEAN NOT NULL DEFAULT TRUE,
+                        muted_by_user_id INTEGER REFERENCES users(id),
+                        muted_at TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(tenant_id, chat_key)
+                    )
+                """))
+                await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_ai_chat_mutes_tenant_chat ON ai_chat_mutes(tenant_id, chat_key)"))
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS audit_log (
+                        id SERIAL PRIMARY KEY,
+                        tenant_id INTEGER REFERENCES tenants(id),
+                        actor_user_id INTEGER NOT NULL REFERENCES users(id),
+                        action VARCHAR(128) NOT NULL,
+                        payload_json JSONB,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_audit_log_tenant_created ON audit_log(tenant_id, created_at)"))
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS notifications (
+                        id SERIAL PRIMARY KEY,
+                        tenant_id INTEGER REFERENCES tenants(id),
+                        user_id INTEGER NOT NULL REFERENCES users(id),
+                        type VARCHAR(64) NOT NULL,
+                        title VARCHAR(255),
+                        body TEXT,
+                        is_read BOOLEAN NOT NULL DEFAULT FALSE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        lead_id INTEGER REFERENCES leads(id)
+                    )
+                """))
+                await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_notifications_user_unread ON notifications(user_id, is_read)"))
+                print("[OK] Tablicy ai_chat_mutes, audit_log, notifications provereny")
+            except Exception as e:
+                print(f"[WARN] CRM v2.5 tables: {type(e).__name__}: {e}")
     if "sqlite" in db_url:
         try:
             await conn.execute(text(

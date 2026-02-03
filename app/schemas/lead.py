@@ -91,6 +91,12 @@ class AIMuteUpdate(BaseModel):
     muted: bool = Field(..., description="true = отключить AI в этом чате, false = включить")
 
 
+class AIChatMuteBody(BaseModel):
+    """POST /api/ai/mute — mute по chat_key (remoteJid или phone:...)."""
+    chat_key: str = Field(..., min_length=1, description="Уникальный ключ чата: remoteJid или phone:...")
+    muted: bool = Field(..., description="true = отключить AI, false = включить")
+
+
 class LeadAssignBody(BaseModel):
     """PATCH /api/leads/{id}/assign. Тело: assigned_to_user_id (или assigned_user_id)."""
     assigned_to_user_id: Optional[int] = None
@@ -123,6 +129,41 @@ class LeadPatchBody(BaseModel):
 class LeadStageBody(BaseModel):
     """PATCH /api/leads/{id}/stage — перемещение по воронке."""
     stage_id: int
+
+
+class LeadSelectionFilters(BaseModel):
+    """Фильтры для POST /api/leads/selection."""
+    status: Optional[list[str]] = None
+    stage_id: Optional[list[int]] = None
+    assigned: Optional[str] = None  # any | none | mine
+    city: Optional[str] = None
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    search: Optional[str] = None
+
+
+class LeadSelectionBody(BaseModel):
+    """POST /api/leads/selection."""
+    filters: Optional[LeadSelectionFilters] = None
+    sort: str = "created_at"
+    direction: str = "desc"
+    limit: int = 500
+
+
+class AssignPlanItem(BaseModel):
+    """Один элемент плана: by_ranges."""
+    manager_user_id: int
+    from_index: int
+    to_index: int
+
+
+class LeadAssignPlanBody(BaseModel):
+    """POST /api/leads/assign/plan."""
+    lead_ids: list[int]
+    mode: str = "by_ranges"  # by_ranges | by_counts | round_robin
+    plans: list[AssignPlanItem] = []
+    set_status: Optional[str] = None
+    dry_run: bool = False
 
 
 class LeadCommentResponse(BaseModel):

@@ -217,6 +217,11 @@ async def webhook_post(
                         await events_emit("lead_created", {"lead_id": lead.id, "tenant_id": tenant_id})
                     except Exception:
                         pass
+                    try:
+                        for uid in await crud.get_tenant_owner_rop_user_ids(db, tenant_id):
+                            await crud.notification_create(db, user_id=uid, type="lead_created", title="Новый лид", body=f"Лид #{lead.id}", tenant_id=tenant_id, lead_id=lead.id)
+                    except Exception:
+                        pass
                 await conversation_service.append_user_message(db, conv.id, text, raw_json=msg, external_message_id=msg_id or None)
                 log.info(f"[WA][CHAT] conv_id={conv.id} tenant_id={tenant_id} from={from_wa_id} stored user msg")
 

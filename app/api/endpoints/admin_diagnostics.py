@@ -3,7 +3,7 @@ Admin-only diagnostics: DB tables check и smoke-test комментариев.
 Доступ только для админа (get_current_admin).
 """
 from fastapi import APIRouter, Depends
-from sqlalchemy import text, select
+from sqlalchemy import text, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, get_current_admin
@@ -77,6 +77,34 @@ async def diagnostics_db(
         "ok": True,
         "tables": tables,
         "notes": notes,
+    }
+
+
+@router.get("/diagnostics/leads-health", response_model=dict)
+async def diagnostics_leads_health(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin),
+):
+    """
+    CRM v2.5: доля лидов без tenant_id. total_leads, leads_without_tenant_id, sample.
+    """
+    r_total = await db.execute(select(func.count(Lead.id)))
+    total_leads = r_total.scalar() or 0
+    r_without = await db.execute(select(func.count(Lead.id)).where(Lead.tenant_id.is_(None)))
+    leads_without_tenant_id = r_without.scalar() or 0
+    r_sample = await db.execute(
+        select(Lead).where(Lead.tenant_id.is_(None)).order_by(Lead.id.desc()).limit(20)
+    )
+    sample_leads = list(r_sample.scalars().all())
+    sample = [
+        {"id": l.id, "phone": getattr(l, "phone", None), "created_at": getattr(l, "created_at", None)}
+        for l in sample_leads
+    ]
+    return {
+        "ok": True,
+        "total_leads": total_leads,
+        "leads_without_tenant_id": leads_without_tenant_id,
+        "leads_without_tenant_id_sample": sample,
     }
 
 

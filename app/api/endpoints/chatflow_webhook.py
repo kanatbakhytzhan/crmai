@@ -319,6 +319,16 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
         log.error("[CHATFLOW] get_or_create_conversation error: %s", type(e).__name__, exc_info=True)
         return {"ok": True}
 
+    # CRM v2.5: лид с первого сообщения — создать/найти и при необходимости backfill tenant_id
+    try:
+        lead = await crud.get_or_create_lead_for_chatflow_jid(db, tenant_id=tenant_id, remote_jid=remote_jid)
+        if lead and not getattr(lead, "tenant_id", None):
+            lead.tenant_id = tenant_id
+            await db.commit()
+            await db.refresh(lead)
+    except Exception as e:
+        log.warning("[CHATFLOW] get_or_create_lead_for_chatflow_jid: %s", type(e).__name__)
+
     text_norm = _normalize_command_text(user_text or "")
     jid_safe = remote_jid[-4:] if len(remote_jid) >= 4 else "****"
 
@@ -389,6 +399,11 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
                         await events_emit("lead_created", {"lead_id": active_lead.id, "tenant_id": tenant_id})
                     except Exception:
                         pass
+                    try:
+                        for uid in await crud.get_tenant_owner_rop_user_ids(db, tenant_id):
+                            await crud.notification_create(db, user_id=uid, type="lead_created", title="Новый лид", body=f"Лид #{active_lead.id}", tenant_id=tenant_id, lead_id=active_lead.id)
+                    except Exception:
+                        pass
         except Exception as e:
             log.warning("[CHATFLOW] phone-from-message: %s", type(e).__name__)
         reply_phone = "Спасибо! Номер записал ✅"
@@ -437,9 +452,15 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
 
     response_text = ""
     function_call = None
+    lead_for_debug = await crud.get_or_create_lead_for_chatflow_jid(db, tenant_id=tenant_id, remote_jid=remote_jid)
     try:
         response_text, function_call = await openai_service.chat_with_gpt(
-            messages_for_gpt, use_functions=True, extra_system_content=extra_system, system_override=system_override
+            messages_for_gpt,
+            use_functions=True,
+            extra_system_content=extra_system,
+            system_override=system_override,
+            _tenant_id=tenant_id,
+            _lead_id=lead_for_debug.id if lead_for_debug else None,
         )
         log.info("[CHATFLOW] openai ok reply_len=%s function_call=%s", len(response_text or ""), bool(function_call))
     except Exception as e:
@@ -504,6 +525,11 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
                     log.info("[CHATFLOW] lead created lead_id=%s", active_lead.id)
                     try:
                         await events_emit("lead_created", {"lead_id": active_lead.id, "tenant_id": tenant_id})
+                    except Exception:
+                        pass
+                    try:
+                        for uid in await crud.get_tenant_owner_rop_user_ids(db, tenant_id):
+                            await crud.notification_create(db, user_id=uid, type="lead_created", title="Новый лид", body=f"Лид #{active_lead.id}", tenant_id=tenant_id, lead_id=active_lead.id)
                     except Exception:
                         pass
                 if language == "kk":

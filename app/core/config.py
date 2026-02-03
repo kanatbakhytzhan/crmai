@@ -65,6 +65,8 @@ class Settings(BaseSettings):
     
     # CRM v2 (feature-flag): нумерация лидов, GET /api/v2/leads/table
     crm_v2_enabled: str = "false"  # "true" — включить v2 API и lead_number
+    # CRM v2.5: логировать применение tenant prompt (только длина/флаг, не сам текст)
+    crm_debug_prompt: str = "false"  # "true" — stdout: tenant_id, ai_prompt_len, using_default_prompt, lead_id
 
     # Multi-tenant + WhatsApp (подготовка)
     multitenant_enabled: str = "false"  # "true" — фильтр лидов по tenant

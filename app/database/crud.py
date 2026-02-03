@@ -12,6 +12,7 @@ from app.database.models import (
     User, BotUser, Message, Lead, LeadStatus, LeadComment, Tenant, TenantUser, WhatsAppAccount,
     Conversation, ConversationMessage, ChatMute, ChatAIState,
     Pipeline, PipelineStage, LeadTask,
+    AIChatMute, AuditLog, Notification,
 )
 from app.core.security import get_password_hash
 
@@ -472,6 +473,142 @@ async def bulk_assign_leads(
     if assigned:
         await db.commit()
     return assigned, len(skipped_ids), skipped_ids
+
+
+async def leads_selection(
+    db: AsyncSession,
+    user_id: int,
+    filters: dict,
+    sort: str = "created_at",
+    direction: str = "desc",
+    limit: int = 500,
+) -> tuple[List[int], int]:
+    """
+    CRM v2.5: отбор лидов по фильтрам. Видимость по get_leads_for_user_crm.
+    filters: status[], stage_id[], assigned (any|none|mine), city, date_from, date_to, search.
+    Возвращает (lead_ids, total).
+    """
+    candidates = await get_leads_for_user_crm(db, user_id, limit=5000)
+    status_list = filters.get("status")
+    if isinstance(status_list, list):
+        statuses = [s.strip().lower() for s in status_list if s]
+        status_enum = []
+        for s in statuses:
+            if s in ("new",): status_enum.append(LeadStatus.NEW)
+            elif s in ("in_progress",): status_enum.append(LeadStatus.IN_PROGRESS)
+            elif s in ("done", "success",): status_enum.append(LeadStatus.DONE)
+            elif s in ("cancelled", "failed",): status_enum.append(LeadStatus.CANCELLED)
+        if status_enum:
+            candidates = [l for l in candidates if l.status in status_enum]
+    stage_ids = filters.get("stage_id")
+    if isinstance(stage_ids, list) and stage_ids:
+        stage_set = set(int(x) for x in stage_ids if x is not None)
+        if stage_set:
+            candidates = [l for l in candidates if getattr(l, "stage_id", None) in stage_set]
+    assigned = filters.get("assigned")
+    if assigned == "none":
+        candidates = [l for l in candidates if not getattr(l, "assigned_user_id", None)]
+    elif assigned == "mine":
+        candidates = [l for l in candidates if getattr(l, "assigned_user_id", None) == user_id]
+    city = (filters.get("city") or "").strip()
+    if city:
+        candidates = [l for l in candidates if (l.city or "").strip().lower() == city.lower()]
+    date_from = filters.get("date_from")
+    date_to = filters.get("date_to")
+    if date_from or date_to:
+        try:
+            if date_from:
+                df = datetime.fromisoformat(str(date_from).replace("Z", "+00:00")) if isinstance(date_from, str) else date_from
+                candidates = [l for l in candidates if l.created_at and l.created_at >= df]
+            if date_to:
+                dt = datetime.fromisoformat(str(date_to).replace("Z", "+00:00")) if isinstance(date_to, str) else date_to
+                candidates = [l for l in candidates if l.created_at and l.created_at <= dt]
+        except Exception:
+            pass
+    search = (filters.get("search") or "").strip()
+    if search:
+        search_lower = search.lower()
+        candidates = [
+            l for l in candidates
+            if search_lower in (l.name or "").lower() or search_lower in (l.phone or "").lower()
+            or search_lower in (l.summary or "").lower() or search_lower in (l.city or "").lower()
+        ]
+    total = len(candidates)
+    reverse = (direction or "desc").strip().lower() == "desc"
+    if (sort or "created_at").strip().lower() == "assigned_at":
+        candidates.sort(key=lambda l: (getattr(l, "assigned_at") or datetime.min), reverse=reverse)
+    else:
+        candidates.sort(key=lambda l: l.created_at or datetime.min, reverse=reverse)
+    limited = candidates[: limit]
+    return [l.id for l in limited], total
+
+
+async def assign_plan_execute(
+    db: AsyncSession,
+    lead_ids: List[int],
+    plans: List[dict],
+    mode: str,
+    current_user_id: int,
+    set_status: Optional[LeadStatus] = None,
+    dry_run: bool = False,
+) -> tuple[Optional[List[dict]], Optional[int], Optional[List[str]]]:
+    """
+    CRM v2.5: распределение по плану. mode=by_ranges: plans=[{manager_user_id, from_index, to_index}] (1-based).
+    Возвращает (preview_list, assigned_count, errors). При dry_run — (preview, None, None).
+    """
+    from app.database.models import LeadStatus
+    multitenant = True
+    visible = []
+    for lid in lead_ids:
+        lead = await get_lead_by_id(db, lid, current_user_id, multitenant_include_tenant_leads=True)
+        if lead and lead.tenant_id:
+            role = await get_tenant_user_role(db, lead.tenant_id, current_user_id)
+            if role in ("owner", "rop"):
+                visible.append(lead)
+            elif role == "manager" and getattr(lead, "assigned_user_id", None) == current_user_id:
+                visible.append(lead)
+        elif lead and lead.owner_id == current_user_id:
+            visible.append(lead)
+    visible_ids = [l.id for l in visible]
+    sorted_ids = sorted(visible_ids)
+    preview = []
+    errors = []
+    assigned = 0
+    if mode == "by_ranges":
+        for plan in plans:
+            manager_user_id = plan.get("manager_user_id")
+            if not manager_user_id:
+                errors.append("manager_user_id required")
+                continue
+            from_idx = int(plan.get("from_index", 0)) - 1
+            to_idx = int(plan.get("to_index", 0))
+            if from_idx < 0 or to_idx > len(sorted_ids) or from_idx >= to_idx:
+                errors.append(f"Invalid range from_index={from_idx+1} to_index={to_idx} for plan manager={manager_user_id}")
+                continue
+            slice_ids = sorted_ids[from_idx:to_idx]
+            tenant_id = None
+            for lead_id in slice_ids:
+                lead = await get_lead_by_id(db, lead_id, current_user_id, multitenant_include_tenant_leads=True)
+                if not lead or not lead.tenant_id:
+                    errors.append(f"Lead {lead_id} not found or no tenant")
+                    continue
+                tenant_id = lead.tenant_id
+                tu = await get_tenant_user(db, lead.tenant_id, manager_user_id)
+                if not tu or not getattr(tu, "is_active", True):
+                    errors.append(f"User {manager_user_id} not in tenant or inactive")
+                    continue
+                preview.append({"lead_id": lead_id, "to_manager_id": manager_user_id})
+                if not dry_run:
+                    lead.assigned_user_id = manager_user_id
+                    lead.assigned_at = datetime.utcnow()
+                    if set_status is not None:
+                        lead.status = set_status
+                    assigned += 1
+    if not dry_run and assigned:
+        await db.commit()
+    if dry_run:
+        return preview, None, (errors if errors else None)
+    return None, assigned, (errors if errors else None)
 
 
 async def update_lead_fields(
@@ -1086,10 +1223,11 @@ async def get_tenant_by_id(db: AsyncSession, tenant_id: int) -> Optional[Tenant]
 
 
 async def get_tenant_ids_for_user(db: AsyncSession, user_id: int) -> List[int]:
-    """Tenant IDs, в которых состоит пользователь (tenant_users). Для доступа к лидам tenant."""
-    result = await db.execute(
-        select(TenantUser.tenant_id).where(TenantUser.user_id == user_id)
-    )
+    """Tenant IDs, в которых состоит пользователь (tenant_users, is_active=True)."""
+    q = select(TenantUser.tenant_id).where(TenantUser.user_id == user_id)
+    if hasattr(TenantUser, "is_active"):
+        q = q.where(TenantUser.is_active == True)
+    result = await db.execute(q)
     return [row[0] for row in result.all()]
 
 
@@ -1125,16 +1263,25 @@ async def get_tenant_user_role(db: AsyncSession, tenant_id: int, user_id: int) -
 
 
 async def list_tenant_users_with_user(
-    db: AsyncSession, tenant_id: int
+    db: AsyncSession, tenant_id: int, active_only: bool = False
 ) -> List[tuple]:
     """Список (TenantUser, User) для tenant. Для GET /api/admin/tenants/{id}/users."""
-    result = await db.execute(
+    q = (
         select(TenantUser, User)
         .join(User, TenantUser.user_id == User.id)
         .where(TenantUser.tenant_id == tenant_id)
-        .order_by(TenantUser.id.asc())
     )
+    if active_only:
+        q = q.where(TenantUser.is_active == True)
+    q = q.order_by(TenantUser.id.asc())
+    result = await db.execute(q)
     return list(result.all())
+
+
+async def get_tenant_user_by_id(db: AsyncSession, tenant_user_id: int) -> Optional[TenantUser]:
+    """TenantUser по id."""
+    result = await db.execute(select(TenantUser).where(TenantUser.id == tenant_user_id))
+    return result.scalar_one_or_none()
 
 
 async def create_tenant_user(
@@ -1142,13 +1289,50 @@ async def create_tenant_user(
     tenant_id: int,
     user_id: int,
     role: str = "member",
+    parent_user_id: Optional[int] = None,
+    is_active: bool = True,
 ) -> TenantUser:
-    """Добавить пользователя в tenant (multi-user в одном tenant). Если уже есть — вернуть существующую запись."""
+    """Добавить пользователя в tenant. Если уже есть — обновить role/parent/is_active и вернуть."""
     existing = await get_tenant_user(db, tenant_id, user_id)
     if existing:
+        existing.role = (role or existing.role or "member").strip() or existing.role
+        if parent_user_id is not None:
+            existing.parent_user_id = parent_user_id
+        existing.is_active = is_active
+        await db.commit()
+        await db.refresh(existing)
         return existing
-    tu = TenantUser(tenant_id=tenant_id, user_id=user_id, role=(role or "member").strip() or "member")
+    tu = TenantUser(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        role=(role or "member").strip() or "member",
+        parent_user_id=parent_user_id,
+        is_active=is_active,
+    )
     db.add(tu)
+    await db.commit()
+    await db.refresh(tu)
+    return tu
+
+
+async def update_tenant_user(
+    db: AsyncSession,
+    tenant_user_id: int,
+    tenant_id: int,
+    role: Optional[str] = None,
+    parent_user_id: Optional[int] = None,
+    is_active: Optional[bool] = None,
+) -> Optional[TenantUser]:
+    """Обновить tenant_user. Проверка tenant_id — запись должна принадлежать tenant."""
+    tu = await get_tenant_user_by_id(db, tenant_user_id)
+    if not tu or tu.tenant_id != tenant_id:
+        return None
+    if role is not None:
+        tu.role = (role or "").strip() or tu.role
+    if parent_user_id is not None:
+        tu.parent_user_id = parent_user_id
+    if is_active is not None:
+        tu.is_active = is_active
     await db.commit()
     await db.refresh(tu)
     return tu
@@ -1157,12 +1341,23 @@ async def create_tenant_user(
 async def delete_tenant_user(
     db: AsyncSession, tenant_id: int, user_id: int
 ) -> bool:
-    """Удалить пользователя из tenant. Возвращает True если удалён."""
+    """Удалить пользователя из tenant (hard delete). Возвращает True если удалён."""
     tu = await get_tenant_user(db, tenant_id, user_id)
     if not tu:
         return False
     await db.delete(tu)
     await db.commit()
+    return True
+
+
+async def soft_delete_tenant_user(db: AsyncSession, tenant_user_id: int, tenant_id: int) -> bool:
+    """Soft delete: is_active=false. Возвращает True если обновлён."""
+    tu = await get_tenant_user_by_id(db, tenant_user_id)
+    if not tu or tu.tenant_id != tenant_id:
+        return False
+    tu.is_active = False
+    await db.commit()
+    await db.refresh(tu)
     return True
 
 
@@ -1389,38 +1584,210 @@ async def get_active_chatflow_account_for_tenant(db: AsyncSession, tenant_id: in
 # ========== chat_ai_states (per-chat /stop /start по remoteJid) ==========
 
 async def get_chat_ai_state(db: AsyncSession, tenant_id: int, remote_jid: str) -> bool:
-    """AI включён в этом чате (tenant_id, remote_jid). Default True если записи нет."""
+    """AI включён в этом чате. Сначала ai_chat_mutes по chat_key=remote_jid, затем chat_ai_states."""
     if not (remote_jid or "").strip():
         return True
-    from app.database.models import ChatAIState
+    chat_key = (remote_jid or "").strip()
+    # CRM v2.5: ai_chat_mutes (единый источник по chat_key)
+    result = await db.execute(
+        select(AIChatMute)
+        .where(AIChatMute.tenant_id == tenant_id)
+        .where(AIChatMute.chat_key == chat_key)
+    )
+    row = result.scalar_one_or_none()
+    if row is not None:
+        return not row.is_muted
     result = await db.execute(
         select(ChatAIState)
         .where(ChatAIState.tenant_id == tenant_id)
-        .where(ChatAIState.remote_jid == remote_jid.strip())
+        .where(ChatAIState.remote_jid == chat_key)
     )
     row = result.scalar_one_or_none()
     return row.is_enabled if row else True
 
 
 async def set_chat_ai_state(db: AsyncSession, tenant_id: int, remote_jid: str, enabled: bool) -> None:
-    """Включить/выключить AI в чате (tenant_id, remote_jid). Upsert."""
+    """Включить/выключить AI в чате. Пишем в ai_chat_mutes (chat_key=remote_jid) и chat_ai_states для совместимости."""
     jid = (remote_jid or "").strip()
     if not jid:
         return
+    is_muted = not enabled
+    # ai_chat_mutes upsert
     result = await db.execute(
-        select(ChatAIState).where(ChatAIState.tenant_id == tenant_id).where(ChatAIState.remote_jid == jid)
+        select(AIChatMute).where(AIChatMute.tenant_id == tenant_id).where(AIChatMute.chat_key == jid)
     )
     row = result.scalar_one_or_none()
     if row:
-        row.is_enabled = enabled
-        row.updated_at = datetime.utcnow()
+        row.is_muted = is_muted
+        row.muted_at = datetime.utcnow()
         await db.commit()
         await db.refresh(row)
     else:
-        row = ChatAIState(tenant_id=tenant_id, remote_jid=jid, is_enabled=enabled)
+        row = AIChatMute(tenant_id=tenant_id, chat_key=jid, is_muted=is_muted, muted_at=datetime.utcnow())
         db.add(row)
         await db.commit()
         await db.refresh(row)
+    # chat_ai_states для обратной совместимости
+    result2 = await db.execute(
+        select(ChatAIState).where(ChatAIState.tenant_id == tenant_id).where(ChatAIState.remote_jid == jid)
+    )
+    r2 = result2.scalar_one_or_none()
+    if r2:
+        r2.is_enabled = enabled
+        r2.updated_at = datetime.utcnow()
+        await db.commit()
+    else:
+        r2 = ChatAIState(tenant_id=tenant_id, remote_jid=jid, is_enabled=enabled)
+        db.add(r2)
+        await db.commit()
+
+
+async def get_ai_chat_mute(db: AsyncSession, tenant_id: int, chat_key: str) -> Optional[bool]:
+    """Проверить mute по chat_key. Возвращает is_muted (True/False) или None если записи нет."""
+    key = (chat_key or "").strip()
+    if not key:
+        return None
+    result = await db.execute(
+        select(AIChatMute).where(AIChatMute.tenant_id == tenant_id).where(AIChatMute.chat_key == key)
+    )
+    row = result.scalar_one_or_none()
+    return row.is_muted if row else None
+
+
+async def set_ai_chat_mute(
+    db: AsyncSession,
+    tenant_id: int,
+    chat_key: str,
+    is_muted: bool,
+    lead_id: Optional[int] = None,
+    muted_by_user_id: Optional[int] = None,
+) -> None:
+    """Установить mute по chat_key. Upsert в ai_chat_mutes."""
+    key = (chat_key or "").strip()
+    if not key:
+        return
+    result = await db.execute(
+        select(AIChatMute).where(AIChatMute.tenant_id == tenant_id).where(AIChatMute.chat_key == key)
+    )
+    row = result.scalar_one_or_none()
+    if row:
+        row.is_muted = is_muted
+        row.lead_id = lead_id
+        row.muted_by_user_id = muted_by_user_id
+        row.muted_at = datetime.utcnow()
+        await db.commit()
+        await db.refresh(row)
+    else:
+        row = AIChatMute(
+            tenant_id=tenant_id,
+            chat_key=key,
+            is_muted=is_muted,
+            lead_id=lead_id,
+            muted_by_user_id=muted_by_user_id,
+            muted_at=datetime.utcnow(),
+        )
+        db.add(row)
+        await db.commit()
+
+
+# ========== audit_log (CRM v2.5) ==========
+
+async def audit_log_append(
+    db: AsyncSession,
+    actor_user_id: int,
+    action: str,
+    tenant_id: Optional[int] = None,
+    payload: Optional[dict] = None,
+) -> None:
+    """Добавить запись в audit_log."""
+    import json
+    payload_json = json.dumps(payload, ensure_ascii=False) if payload else None
+    row = AuditLog(tenant_id=tenant_id, actor_user_id=actor_user_id, action=(action or "").strip(), payload_json=payload_json)
+    db.add(row)
+    await db.commit()
+
+
+# ========== notifications (CRM v2.5) ==========
+
+async def notification_create(
+    db: AsyncSession,
+    user_id: int,
+    type: str,
+    title: Optional[str] = None,
+    body: Optional[str] = None,
+    tenant_id: Optional[int] = None,
+    lead_id: Optional[int] = None,
+) -> Notification:
+    """Создать уведомление."""
+    n = Notification(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        type=(type or "").strip(),
+        title=(title or "").strip() or None,
+        body=(body or "").strip() or None,
+        lead_id=lead_id,
+    )
+    db.add(n)
+    await db.commit()
+    await db.refresh(n)
+    return n
+
+
+async def notifications_for_user(
+    db: AsyncSession,
+    user_id: int,
+    unread_only: bool = False,
+    limit: int = 100,
+) -> List[Notification]:
+    """Список уведомлений пользователя."""
+    q = select(Notification).where(Notification.user_id == user_id)
+    if unread_only:
+        q = q.where(Notification.is_read == False)
+    q = q.order_by(Notification.created_at.desc()).limit(limit)
+    result = await db.execute(q)
+    return list(result.scalars().all())
+
+
+async def notification_mark_read(db: AsyncSession, notification_id: int, user_id: int) -> bool:
+    """Отметить уведомление прочитанным. Только своё."""
+    result = await db.execute(
+        select(Notification).where(Notification.id == notification_id).where(Notification.user_id == user_id)
+    )
+    n = result.scalar_one_or_none()
+    if not n:
+        return False
+    n.is_read = True
+    await db.commit()
+    return True
+
+
+async def notification_mark_all_read(db: AsyncSession, user_id: int) -> int:
+    """Отметить все уведомления пользователя прочитанными. Возвращает количество."""
+    result = await db.execute(
+        select(Notification).where(Notification.user_id == user_id).where(Notification.is_read == False)
+    )
+    items = list(result.scalars().all())
+    for n in items:
+        n.is_read = True
+    if items:
+        await db.commit()
+    return len(items)
+
+
+async def get_tenant_owner_rop_user_ids(db: AsyncSession, tenant_id: int) -> List[int]:
+    """User IDs owner и rop в tenant (для рассылки уведомлений о новом лиде)."""
+    tenant = await get_tenant_by_id(db, tenant_id)
+    ids = []
+    if tenant and getattr(tenant, "default_owner_user_id", None):
+        ids.append(tenant.default_owner_user_id)
+    q = select(TenantUser.user_id).where(TenantUser.tenant_id == tenant_id).where(TenantUser.role.in_(["owner", "rop"]))
+    if hasattr(TenantUser, "is_active"):
+        q = q.where(TenantUser.is_active == True)
+    result = await db.execute(q)
+    for row in result.all():
+        if row[0] and row[0] not in ids:
+            ids.append(row[0])
+    return ids
 
 
 # ========== WhatsApp conversation history (per tenant + wa_from) ==========
@@ -1539,6 +1906,49 @@ async def trim_conversation_messages(
         await db.delete(msg)
     await db.commit()
     return len(to_delete)
+
+
+async def get_or_create_lead_for_chatflow_jid(
+    db: AsyncSession,
+    tenant_id: int,
+    remote_jid: str,
+) -> Optional[Lead]:
+    """
+    CRM v2.5: при первом сообщении — лид должен существовать. Найти по (tenant + jid) или создать.
+    phone_from_jid = jid.split('@')[0]. Backfill tenant_id если у лида null.
+    """
+    if not (remote_jid or "").strip():
+        return None
+    tenant = await get_tenant_by_id(db, tenant_id)
+    if not tenant:
+        return None
+    owner_id = getattr(tenant, "default_owner_user_id", None)
+    if owner_id is None:
+        first_user = await get_first_user(db)
+        if not first_user:
+            return None
+        owner_id = first_user.id
+    bot_user = await get_or_create_bot_user(db, user_id=remote_jid.strip(), owner_id=owner_id)
+    active_lead = await get_active_lead_by_bot_user(db, bot_user.id)
+    if active_lead:
+        if active_lead.tenant_id is None:
+            active_lead.tenant_id = tenant_id
+            await apply_default_pipeline_to_lead(db, active_lead)
+            await db.commit()
+            await db.refresh(active_lead)
+        return active_lead
+    phone_from_jid = remote_jid.split("@")[0] if "@" in remote_jid else remote_jid
+    lead = await create_lead(
+        db,
+        owner_id=owner_id,
+        bot_user_id=bot_user.id,
+        name="Unknown",
+        phone=phone_from_jid or "unknown",
+        summary="",
+        language="ru",
+        tenant_id=tenant_id,
+    )
+    return lead
 
 
 async def create_lead_from_whatsapp(

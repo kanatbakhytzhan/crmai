@@ -216,25 +216,28 @@ async def chat_with_gpt(
     use_functions: bool = True,
     extra_system_content: Optional[str] = None,
     system_override: Optional[str] = None,
+    _tenant_id: Optional[int] = None,
+    _lead_id: Optional[int] = None,
 ) -> Tuple[str, Optional[Dict]]:
     """
     Отправить сообщения в GPT-4o и получить ответ.
-
-    Args:
-        messages: История сообщений в формате OpenAI
-        use_functions: Использовать ли Function Calling
-        extra_system_content: Дополнительный текст к system (например: не повторять приветствия при контексте)
-        system_override: Заменить дефолтный system prompt (например tenant.ai_prompt). Если пусто — используется SYSTEM_PROMPT.
-
-    Returns:
-        Tuple: (текст ответа, данные function_call если есть)
+    system_override: если задан и не пустой — используется tenant.ai_prompt; иначе SYSTEM_PROMPT.
+    _tenant_id, _lead_id: только для CRM_DEBUG_PROMPT (логирование длины, без текста промпта).
     """
     try:
+        using_override = bool((system_override or "").strip())
         system_content = (system_override or "").strip() or SYSTEM_PROMPT
         if extra_system_content and extra_system_content.strip():
             system_content = system_content + "\n\n" + extra_system_content.strip()
         full_messages = [{"role": "system", "content": system_content}] + messages
-        
+
+        if get_settings().crm_debug_prompt.strip().upper() == "TRUE":
+            prompt_len = len(system_content)
+            print(
+                f"[CRM_DEBUG_PROMPT] tenant_id={_tenant_id} ai_prompt_len={prompt_len} "
+                f"using_default_prompt={not using_override} lead_id={_lead_id}"
+            )
+
         print(f"[GPT] Otpravka {len(full_messages)} soobshcheniy")
         
         # Параметры запроса

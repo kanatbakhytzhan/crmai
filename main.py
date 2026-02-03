@@ -16,7 +16,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.database.session import init_db, drop_all_tables, engine, sync_engine, Base
-from app.api.endpoints import chat, auth, admin_users, admin_tenants, admin_diagnostics, admin_recovery, whatsapp_webhook, chatflow_webhook, me, leads_v2, pipelines, tasks, events
+from app.api.endpoints import chat, auth, admin_users, admin_tenants, admin_diagnostics, admin_recovery, whatsapp_webhook, chatflow_webhook, me, leads_v2, pipelines, tasks, events, notifications
 from app.services.telegram_service import stop_bot
 from app.admin import setup_admin
 
@@ -26,6 +26,7 @@ from app.database.models import (
     User, BotUser, Message, Lead, LeadComment, Tenant, TenantUser, WhatsAppAccount,
     Conversation, ConversationMessage, ChatMute, ChatAIState,
     Pipeline, PipelineStage, LeadTask,
+    AIChatMute, AuditLog, Notification,
 )
 from app.api.deps import get_db
 from app.api.endpoints import auth as auth_endpoints
@@ -170,6 +171,7 @@ app.include_router(leads_v2.router, prefix="/api/v2", tags=["CRM v2"])
 app.include_router(pipelines.router, prefix="/api", tags=["Pipelines"])
 app.include_router(tasks.router, prefix="/api", tags=["Tasks"])
 app.include_router(events.router, prefix="/api", tags=["Events"])
+app.include_router(notifications.router, prefix="/api", tags=["Notifications"])
 
 # Подключение админ-панели (используем СИНХРОННЫЙ engine!)
 setup_admin(app, sync_engine)

@@ -5,7 +5,7 @@ API эндпоинты админки: tenants и whatsapp_accounts (multi-tenan
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db, get_current_admin
+from app.api.deps import get_db, get_current_admin, get_current_user
 from app.database import crud
 from app.database.models import User
 from app.schemas.tenant import (
@@ -15,6 +15,7 @@ from app.schemas.tenant import (
     AISettingsResponse,
     AISettingsUpdate,
     TenantUserAdd,
+    TenantUserPatch,
     TenantUserResponse,
     WhatsAppAccountCreate,
     WhatsAppAccountResponse,
@@ -120,16 +121,28 @@ async def list_tenants(
     return {"tenants": [_tenant_response(t, base_url) for t in tenants], "total": len(tenants)}
 
 
+async def _require_tenant_admin_or_owner_rop(db: AsyncSession, tenant_id: int, current_user: User) -> str | None:
+    """Проверка доступа: admin или owner/rop в tenant. Возвращает роль или None (403)."""
+    if getattr(current_user, "is_admin", False):
+        return "admin"
+    role = await crud.get_tenant_user_role(db, tenant_id, current_user.id)
+    if role in ("owner", "rop"):
+        return role
+    return None
+
+
 @router.get("/tenants/{tenant_id}/users", response_model=dict)
 async def list_tenant_users(
     tenant_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(get_current_user),
 ):
     """
-    Список пользователей tenant (tenant_users + данные User).
-    Привязка пользователей к tenant для доступа к лидам и CRM.
+    Список пользователей tenant (tenant_users + User). CRM v2.5: parent_user_id, is_active.
+    Доступ: admin или owner/rop в этом tenant.
     """
+    if not await _require_tenant_admin_or_owner_rop(db, tenant_id, current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin or tenant owner/rop required")
     tenant = await crud.get_tenant_by_id(db, tenant_id)
     if not tenant:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
@@ -141,6 +154,8 @@ async def list_tenant_users(
             email=user.email,
             company_name=user.company_name,
             role=tu.role or "member",
+            parent_user_id=getattr(tu, "parent_user_id", None),
+            is_active=getattr(tu, "is_active", True),
             created_at=tu.created_at,
         )
         for tu, user in rows
@@ -153,14 +168,28 @@ async def add_tenant_user(
     tenant_id: int,
     body: TenantUserAdd,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(get_current_user),
 ):
     """
-    Добавить пользователя к tenant по email и role.
-    Body: { "email": "user@mail.com", "role": "owner" | "rop" | "manager" }.
-    Если пользователя нет — создаём с временным паролем (temporary_password в ответе один раз).
+    Добавить пользователя к tenant. Body: email, role, parent_user_id?, is_active?.
+    ROP может создавать только manager с parent_user_id = self. Если пользователя нет — создаём с temporary_password.
     """
     import secrets
+    access = await _require_tenant_admin_or_owner_rop(db, tenant_id, current_user)
+    if not access:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin or tenant owner/rop required")
+    role = (body.role or "member").strip().lower() or "manager"
+    if role not in ("owner", "rop", "manager", "admin", "member"):
+        role = "manager"
+    if access == "rop":
+        if role != "manager":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="ROP can only add managers")
+        if body.parent_user_id is not None and body.parent_user_id != current_user.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="ROP must set parent_user_id to self")
+        parent_user_id = current_user.id
+    else:
+        parent_user_id = body.parent_user_id
+    is_active = body.is_active if body.is_active is not None else True
     tenant = await crud.get_tenant_by_id(db, tenant_id)
     if not tenant:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
@@ -171,10 +200,7 @@ async def add_tenant_user(
         user = await crud.create_user(
             db, email=body.email.strip(), password=temporary_password, company_name=body.email.strip().split("@")[0] or "User"
         )
-    role = (body.role or "member").strip().lower() or "manager"
-    if role not in ("owner", "rop", "manager", "admin", "member"):
-        role = "manager"
-    tu = await crud.create_tenant_user(db, tenant_id=tenant_id, user_id=user.id, role=role)
+    tu = await crud.create_tenant_user(db, tenant_id=tenant_id, user_id=user.id, role=role, parent_user_id=parent_user_id, is_active=is_active)
     out = {
         "ok": True,
         "user": TenantUserResponse(
@@ -183,12 +209,79 @@ async def add_tenant_user(
             email=user.email,
             company_name=user.company_name,
             role=tu.role or role,
+            parent_user_id=getattr(tu, "parent_user_id", None),
+            is_active=getattr(tu, "is_active", True),
             created_at=tu.created_at,
         ),
     }
     if temporary_password:
         out["temporary_password"] = temporary_password
     return out
+
+
+@router.patch("/tenants/users/{tenant_user_id}", response_model=dict)
+async def patch_tenant_user(
+    tenant_user_id: int,
+    body: TenantUserPatch,
+    tenant_id: int = Query(..., description="tenant_id для проверки доступа"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Обновить tenant_user: role, parent_user_id, is_active. ROP — только managers, parent_user_id=self."""
+    access = await _require_tenant_admin_or_owner_rop(db, tenant_id, current_user)
+    if not access:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin or tenant owner/rop required")
+    tu = await crud.get_tenant_user_by_id(db, tenant_user_id)
+    if not tu or tu.tenant_id != tenant_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant user not found")
+    if access == "rop" and (tu.role or "").lower() != "manager":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="ROP can only edit managers")
+    if access == "rop" and body.parent_user_id is not None and body.parent_user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="ROP must set parent_user_id to self")
+    updated = await crud.update_tenant_user(
+        db, tenant_user_id, tenant_id,
+        role=body.role,
+        parent_user_id=body.parent_user_id,
+        is_active=body.is_active,
+    )
+    if not updated:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant user not found")
+    u = await crud.get_user_by_id(db, updated.user_id)
+    return {
+        "ok": True,
+        "user": TenantUserResponse(
+            id=updated.id,
+            user_id=updated.user_id,
+            email=u.email if u else "",
+            company_name=u.company_name if u else None,
+            role=updated.role or "member",
+            parent_user_id=getattr(updated, "parent_user_id", None),
+            is_active=getattr(updated, "is_active", True),
+            created_at=updated.created_at,
+        ),
+    }
+
+
+@router.delete("/tenants/users/{tenant_user_id}", response_model=dict)
+async def soft_delete_tenant_user_by_id(
+    tenant_user_id: int,
+    tenant_id: int = Query(..., description="tenant_id для проверки доступа"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Soft delete: is_active=false. ROP — только для managers."""
+    access = await _require_tenant_admin_or_owner_rop(db, tenant_id, current_user)
+    if not access:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin or tenant owner/rop required")
+    tu = await crud.get_tenant_user_by_id(db, tenant_user_id)
+    if not tu or tu.tenant_id != tenant_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant user not found")
+    if access == "rop" and (tu.role or "").lower() != "manager":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="ROP can only deactivate managers")
+    ok = await crud.soft_delete_tenant_user(db, tenant_user_id, tenant_id)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant user not found")
+    return {"ok": True}
 
 
 @router.delete("/tenants/{tenant_id}/users/{user_id}")
@@ -198,7 +291,7 @@ async def remove_tenant_user(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_admin),
 ):
-    """Удалить пользователя из tenant."""
+    """Удалить пользователя из tenant (hard delete). Только админ."""
     tenant = await crud.get_tenant_by_id(db, tenant_id)
     if not tenant:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")

@@ -63,15 +63,26 @@ class TenantUserAdd(BaseModel):
     """POST /api/admin/tenants/{id}/users — добавить пользователя по email."""
     email: str
     role: str = "member"  # owner | rop | manager (admin/member — legacy)
+    parent_user_id: Optional[int] = None  # для manager: user_id ROP
+    is_active: Optional[bool] = True
+
+
+class TenantUserPatch(BaseModel):
+    """PATCH /api/admin/tenants/users/{tenant_user_id}."""
+    role: Optional[str] = None
+    parent_user_id: Optional[int] = None
+    is_active: Optional[bool] = None
 
 
 class TenantUserResponse(BaseModel):
-    """Пользователь tenant (для GET списка)."""
+    """Пользователь tenant (для GET списка). CRM v2.5: parent_user_id, is_active."""
     id: int
     user_id: int
     email: str
     company_name: Optional[str] = None
     role: str
+    parent_user_id: Optional[int] = None
+    is_active: bool = True
     created_at: datetime
 
     class Config:

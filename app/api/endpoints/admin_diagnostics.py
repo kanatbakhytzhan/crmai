@@ -1,12 +1,15 @@
 """
-Admin-only diagnostics: DB tables check и smoke-test комментариев.
-Доступ только для админа (get_current_admin).
+Admin-only diagnostics: DB tables check, smoke-test, QA-панель.
+Доступ: get_current_admin для большинства; get_current_admin_or_owner для UI и тестов.
 """
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status, Body
+from fastapi.responses import HTMLResponse
 from sqlalchemy import text, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel
+from typing import Optional
 
-from app.api.deps import get_db, get_current_admin
+from app.api.deps import get_db, get_current_admin, get_current_admin_or_owner
 from app.core.config import get_settings
 from app.database import crud
 from app.database.models import User, Lead, Tenant
@@ -239,3 +242,229 @@ async def diagnostics_backfill_lead_numbers(
     """
     updated = await crud.backfill_lead_numbers(db)
     return {"ok": True, "updated": updated}
+
+
+# ---------- QA Panel (admin/owner) ----------
+
+QA_UI_HTML = """<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>BuildCRM QA / Diagnostics</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 24px auto; padding: 0 16px; }
+    h1 { font-size: 1.25rem; }
+    input[type="text"], input[type="number"] { width: 100%; max-width: 320px; padding: 6px 8px; margin: 4px 0; }
+    button { padding: 8px 14px; margin: 4px 6px 4px 0; cursor: pointer; background: #2563eb; color: #fff; border: none; border-radius: 6px; }
+    button:hover { background: #1d4ed8; }
+    button.secondary { background: #64748b; }
+    #result { background: #f1f5f9; padding: 12px; border-radius: 8px; white-space: pre-wrap; word-break: break-all; font-size: 12px; max-height: 60vh; overflow: auto; }
+    .row { margin: 10px 0; }
+    label { display: block; font-weight: 600; margin-bottom: 4px; }
+  </style>
+</head>
+<body>
+  <h1>BuildCRM — QA / Diagnostics</h1>
+  <p>Проверка API без Postman. Сначала сохраните JWT (получить: <b>POST /api/auth/login</b>).</p>
+  <div class="row">
+    <label>JWT (Bearer)</label>
+    <input type="text" id="token" placeholder="Вставьте access_token">
+    <button onclick="saveToken()">Save token</button>
+  </div>
+  <div class="row">
+    <button onclick="call('GET','/api/admin/diagnostics/db')">DB Tables Check</button>
+    <button onclick="call('POST','/api/admin/diagnostics/smoke-test')">Smoke Test Comments</button>
+    <button onclick="call('POST','/api/admin/diagnostics/create-test-lead', {})">Create Test Lead</button>
+  </div>
+  <div class="row">
+    <label>Tenant ID</label>
+    <input type="number" id="tenant_id" placeholder="1">
+    <label>Message (для Check Tenant Prompt)</label>
+    <input type="text" id="prompt_message" placeholder="Привет">
+    <button onclick="testTenantPrompt()">Check Tenant Prompt</button>
+  </div>
+  <div class="row">
+    <label>Chat key (для Mute Test)</label>
+    <input type="text" id="chat_key" placeholder="77001234567@s.whatsapp.net">
+    <button onclick="testMute()">Mute Chat Test</button>
+  </div>
+  <div class="row">
+    <label>RemoteJid (для Ping ChatFlow)</label>
+    <input type="text" id="remote_jid" placeholder="77001234567@s.whatsapp.net">
+    <button onclick="pingChatflow()">ChatFlow Webhook Ping</button>
+  </div>
+  <div class="row">
+    <label>Ответ</label>
+    <pre id="result">—</pre>
+  </div>
+  <script>
+    function getToken() { return localStorage.getItem('qa_jwt') || document.getElementById('token').value; }
+    function saveToken() {
+      var t = document.getElementById('token').value.trim();
+      if (t) { localStorage.setItem('qa_jwt', t); document.getElementById('result').textContent = 'Token saved.'; }
+    }
+    function getTenantId() { var v = document.getElementById('tenant_id').value; return v ? parseInt(v, 10) : null; }
+    function out(x) { document.getElementById('result').textContent = typeof x === 'string' ? x : JSON.stringify(x, null, 2); }
+    async function call(method, path, body) {
+      var token = getToken();
+      if (!token) { out('Error: set JWT and click Save token'); return; }
+      try {
+        var opt = { method: method, headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' } };
+        if (body && Object.keys(body).length) opt.body = JSON.stringify(body);
+        var r = await fetch(path, opt);
+        var j = await r.json().catch(function() { return { _raw: await r.text() }; });
+        out({ status: r.status, ok: r.ok, body: j });
+      } catch (e) { out('Error: ' + e.message); }
+    }
+    function testTenantPrompt() {
+      var tid = getTenantId();
+      var msg = document.getElementById('prompt_message').value.trim() || 'Привет';
+      if (!tid) { out('Error: enter tenant_id'); return; }
+      call('POST', '/api/admin/diagnostics/test-tenant-prompt', { tenant_id: tid, message: msg });
+    }
+    function testMute() {
+      var tid = getTenantId();
+      var key = document.getElementById('chat_key').value.trim();
+      if (!tid || !key) { out('Error: enter tenant_id and chat_key'); return; }
+      call('POST', '/api/admin/diagnostics/test-mute', { tenant_id: tid, chat_key: key });
+    }
+    function pingChatflow() {
+      var tid = getTenantId();
+      var jid = document.getElementById('remote_jid').value.trim();
+      if (!tid) { out('Error: enter tenant_id'); return; }
+      call('POST', '/api/admin/diagnostics/ping-chatflow', { tenant_id: tid, remoteJid: jid || null });
+    }
+  </script>
+</body>
+</html>"""
+
+
+@router.get("/diagnostics/ui", response_class=HTMLResponse, include_in_schema=False)
+async def diagnostics_ui(
+    current_user: User = Depends(get_current_admin_or_owner),
+):
+    """QA-панель: проверка диагностик без Postman. Доступ: admin или owner tenant."""
+    return QA_UI_HTML
+
+
+class CreateTestLeadBody(BaseModel):
+    tenant_id: Optional[int] = None
+
+
+@router.post("/diagnostics/create-test-lead", response_model=dict)
+async def diagnostics_create_test_lead(
+    body: Optional[CreateTestLeadBody] = Body(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_or_owner),
+):
+    """Создать тестовый лид. Если tenant_id не передан — берётся tenant текущего пользователя (owner)."""
+    tenant_id = body.tenant_id if body and body.tenant_id is not None else None
+    if not tenant_id:
+        tenant = await crud.get_tenant_for_me(db, current_user.id)
+        if not tenant:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="tenant_id required or user must have a tenant")
+        tenant_id = tenant.id
+    tenant = await crud.get_tenant_by_id(db, tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    owner_id = getattr(tenant, "default_owner_user_id", None) or current_user.id
+    bot_user = await crud.get_or_create_bot_user(db, user_id=f"qa_test_{tenant_id}_{owner_id}", owner_id=owner_id)
+    lead = await crud.create_lead(
+        db, owner_id=owner_id, bot_user_id=bot_user.id,
+        name="QA Test Lead", phone="+77000000000", summary="Created from QA panel", language="ru",
+        tenant_id=tenant_id,
+    )
+    return {"ok": True, "lead_id": lead.id}
+
+
+class TestTenantPromptBody(BaseModel):
+    tenant_id: int
+    message: str = "Привет"
+
+
+@router.post("/diagnostics/test-tenant-prompt", response_model=dict)
+async def diagnostics_test_tenant_prompt(
+    body: TestTenantPromptBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_or_owner),
+):
+    """Проверить, какой system prompt используется для tenant (tenant.ai_prompt или default). Вызов OpenAI — reply_preview без полного промпта."""
+    tenant = await crud.get_tenant_by_id(db, body.tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    prompt = (getattr(tenant, "ai_prompt", None) or "").strip()
+    from app.services.openai_service import SYSTEM_PROMPT
+    system_used = prompt or SYSTEM_PROMPT
+    using_default = not bool(prompt)
+    ai_prompt_len = len(prompt) if prompt else 0
+    reply_preview = ""
+    try:
+        from app.services import openai_service
+        msgs = [{"role": "user", "content": body.message[:500]}]
+        text, _ = await openai_service.chat_with_gpt(msgs, use_functions=False, system_override=prompt or None)
+        reply_preview = (text or "")[:200] + ("..." if len(text or "") > 200 else "")
+    except Exception as e:
+        reply_preview = f"(error: {type(e).__name__})"
+    return {
+        "ok": True,
+        "using_default_prompt": using_default,
+        "ai_prompt_len": ai_prompt_len,
+        "reply_preview": reply_preview,
+    }
+
+
+class TestMuteBody(BaseModel):
+    tenant_id: int
+    chat_key: str
+
+
+@router.post("/diagnostics/test-mute", response_model=dict)
+async def diagnostics_test_mute(
+    body: TestMuteBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_or_owner),
+):
+    """Проверить запись mute: выставить true, затем false, вернуть steps."""
+    tenant = await crud.get_tenant_by_id(db, body.tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    steps = []
+    try:
+        await crud.set_ai_chat_mute(db, body.tenant_id, body.chat_key, is_muted=True, muted_by_user_id=current_user.id)
+        steps.append("set mute=true")
+        state = await crud.get_ai_chat_mute(db, body.tenant_id, body.chat_key)
+        steps.append(f"get_ai_chat_mute after true: {state}")
+        await crud.set_ai_chat_mute(db, body.tenant_id, body.chat_key, is_muted=False, muted_by_user_id=current_user.id)
+        steps.append("set mute=false")
+        state2 = await crud.get_ai_chat_mute(db, body.tenant_id, body.chat_key)
+        steps.append(f"get_ai_chat_mute after false: {state2}")
+    except Exception as e:
+        steps.append(f"error: {type(e).__name__}: {e}")
+    return {"ok": True, "steps": steps}
+
+
+class PingChatflowBody(BaseModel):
+    tenant_id: int
+    remoteJid: Optional[str] = None
+
+
+@router.post("/diagnostics/ping-chatflow", response_model=dict)
+async def diagnostics_ping_chatflow(
+    body: PingChatflowBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_or_owner),
+):
+    """Проверить привязку ChatFlow у tenant (token/instance_id, active). Секреты не возвращаем — только длина/masked."""
+    tenant = await crud.get_tenant_by_id(db, body.tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    acc = await crud.get_active_chatflow_account_for_tenant(db, body.tenant_id)
+    if not acc:
+        return {"ok": False, "binding": None, "note": "No active ChatFlow binding for this tenant"}
+    token_len = len(getattr(acc, "chatflow_token", None) or "")
+    instance = (getattr(acc, "chatflow_instance_id", None) or "")[:20]
+    return {
+        "ok": True,
+        "binding": {"token_len": token_len, "instance_id_preview": instance + ("..." if len(getattr(acc, "chatflow_instance_id", None) or "") > 20 else "")},
+        "note": "Send a real message via WhatsApp to trigger the webhook.",
+    }

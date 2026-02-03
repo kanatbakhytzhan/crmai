@@ -12,14 +12,14 @@ from app.schemas.tenant import MeAISettingsResponse, MeAISettingsUpdate
 router = APIRouter()
 
 
-@router.get("/role", response_model=dict)
+@router.get("/role", response_model=dict, summary="Роль и tenant текущего пользователя")
 async def get_me_role(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
-    Роль текущего пользователя в tenant: owner | rop | manager.
-    Возвращает tenant_id и role (если пользователь в tenant).
+    Возвращает **tenant_id** и **role** (owner | rop | manager) для текущего пользователя.
+    Нужен JWT. Если пользователь не привязан к tenant — tenant_id и role будут null.
     """
     tenant = await crud.get_tenant_for_me(db, current_user.id)
     if not tenant:

@@ -51,22 +51,15 @@ async def register(
     return user
 
 
-@router.post("/login", response_model=Token)
+@router.post("/login", response_model=Token, summary="Вход (получить JWT)")
 async def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Авторизация пользователя (получение JWT токена)
-    
-    Args:
-        form_data: OAuth2 форма (username=email, password)
-        
-    Returns:
-        JWT токен
-        
-    Raises:
-        401: Неверный email или пароль
+    Авторизация: username = email, password = пароль. Возвращает **access_token** для заголовка `Authorization: Bearer <token>`.
+    Используйте этот токен в Swagger (кнопка Authorize) и в QA-панели.
+    **401** — неверный email или пароль; **403** — аккаунт отключён.
     """
     # Ищем пользователя по email (username в OAuth2PasswordRequestForm)
     user = await crud.get_user_by_email(db, form_data.username)

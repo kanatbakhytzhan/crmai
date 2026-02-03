@@ -254,7 +254,7 @@ async def chat(
         )
 
 
-@router.get("/leads")
+@router.get("/leads", summary="Список лидов")
 async def get_leads(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -286,7 +286,7 @@ async def get_leads(
     return {"leads": leads_data, "total": len(leads_data)}
 
 
-@router.get("/leads/{lead_id}")
+@router.get("/leads/{lead_id}", summary="Один лид по ID")
 async def get_lead(
     lead_id: int,
     db: AsyncSession = Depends(get_db),
@@ -594,7 +594,7 @@ async def get_lead_ai_status(
     return {"ai_enabled_global": ai_enabled_global, "ai_muted_in_chat": ai_muted_in_chat}
 
 
-@router.post("/leads/{lead_id}/ai-mute", response_model=dict)
+@router.post("/leads/{lead_id}/ai-mute", response_model=dict, summary="Вкл/выкл AI в чате лида (mute)")
 async def post_lead_ai_mute(
     lead_id: int,
     body: AIMuteUpdate,
@@ -666,7 +666,7 @@ async def post_ai_mute_by_chat_key(
     return {"ok": True, "muted": body.muted, "chat_key": chat_key}
 
 
-@router.get("/leads/{lead_id}/comments", response_model=dict)
+@router.get("/leads/{lead_id}/comments", response_model=dict, summary="Комментарии к лиду")
 async def get_lead_comments(
     lead_id: int,
     db: AsyncSession = Depends(get_db),

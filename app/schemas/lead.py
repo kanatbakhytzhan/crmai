@@ -66,6 +66,9 @@ class LeadResponse(BaseModel):
     assigned_user_name: Optional[str] = None  # company_name
     next_call_at: Optional[datetime] = None
     last_contact_at: Optional[datetime] = None
+    pipeline_id: Optional[int] = None
+    stage_id: Optional[int] = None
+    moved_to_stage_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 
@@ -115,6 +118,11 @@ class LeadPatchBody(BaseModel):
     next_call_at: Optional[datetime] = None
     last_contact_at: Optional[datetime] = None
     assigned_user_id: Optional[int] = None
+
+
+class LeadStageBody(BaseModel):
+    """PATCH /api/leads/{id}/stage — перемещение по воронке."""
+    stage_id: int
 
 
 class LeadCommentResponse(BaseModel):

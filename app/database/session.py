@@ -358,6 +358,62 @@ async def init_db():
                 print("[OK] Kolonki leads.assigned_user_id, assigned_at, next_call_at, last_contact_at provereny")
             except Exception as e:
                 print(f"[WARN] leads CRM v2 columns: {type(e).__name__}: {e}")
+            # CRM v2: pipelines, pipeline_stages, lead_tasks; leads.pipeline_id, stage_id, moved_to_stage_at
+            try:
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS pipelines (
+                        id SERIAL PRIMARY KEY,
+                        tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                        name VARCHAR(255) NOT NULL,
+                        is_default BOOLEAN NOT NULL DEFAULT FALSE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_pipelines_tenant_id ON pipelines(tenant_id)"))
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS pipeline_stages (
+                        id SERIAL PRIMARY KEY,
+                        pipeline_id INTEGER NOT NULL REFERENCES pipelines(id),
+                        name VARCHAR(255) NOT NULL,
+                        order_index INTEGER NOT NULL DEFAULT 0,
+                        color VARCHAR(32),
+                        is_closed BOOLEAN NOT NULL DEFAULT FALSE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_pipeline_stages_pipeline_id ON pipeline_stages(pipeline_id)"))
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS lead_tasks (
+                        id SERIAL PRIMARY KEY,
+                        lead_id INTEGER NOT NULL REFERENCES leads(id),
+                        tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                        assigned_to_user_id INTEGER NOT NULL REFERENCES users(id),
+                        type VARCHAR(32) NOT NULL,
+                        due_at TIMESTAMP NOT NULL,
+                        status VARCHAR(32) NOT NULL DEFAULT 'open',
+                        note TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        done_at TIMESTAMP
+                    )
+                """))
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS idx_lead_tasks_user_due_status ON lead_tasks(assigned_to_user_id, due_at, status)"
+                ))
+                await conn.execute(text(
+                    "ALTER TABLE leads ADD COLUMN IF NOT EXISTS pipeline_id INTEGER REFERENCES pipelines(id)"
+                ))
+                await conn.execute(text(
+                    "ALTER TABLE leads ADD COLUMN IF NOT EXISTS stage_id INTEGER REFERENCES pipeline_stages(id)"
+                ))
+                await conn.execute(text(
+                    "ALTER TABLE leads ADD COLUMN IF NOT EXISTS moved_to_stage_at TIMESTAMP"
+                ))
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS idx_leads_tenant_stage ON leads(tenant_id, stage_id) WHERE tenant_id IS NOT NULL AND stage_id IS NOT NULL"
+                ))
+                print("[OK] Tablicy pipelines, pipeline_stages, lead_tasks i kolonki leads provereny")
+            except Exception as e:
+                print(f"[WARN] pipelines/tasks migration: {type(e).__name__}: {e}")
     if "sqlite" in db_url:
         try:
             await conn.execute(text(
@@ -369,7 +425,7 @@ async def init_db():
                 print("[OK] SQLite: leads.lead_number uzhe est")
             else:
                 print(f"[WARN] leads.lead_number SQLite: {type(e).__name__}: {e}")
-        for col, typ in [("assigned_user_id", "INTEGER"), ("assigned_at", "DATETIME"), ("next_call_at", "DATETIME"), ("last_contact_at", "DATETIME")]:
+        for col, typ in [("assigned_user_id", "INTEGER"), ("assigned_at", "DATETIME"), ("next_call_at", "DATETIME"), ("last_contact_at", "DATETIME"), ("pipeline_id", "INTEGER"), ("stage_id", "INTEGER"), ("moved_to_stage_at", "DATETIME")]:
             try:
                 await conn.execute(text(f"ALTER TABLE leads ADD COLUMN {col} {typ}"))
                 print(f"[OK] SQLite: leads.{col} dobavlena")

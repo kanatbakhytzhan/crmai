@@ -212,6 +212,11 @@ async def webhook_post(
                 lead = await crud.create_lead_from_whatsapp(db, tenant_id=tenant_id, message_text=text, from_wa_id=from_wa_id)
                 if lead:
                     log.info(f"[WA] webhook received phone_number_id={phone_number_id} tenant={tenant_id} created lead id={lead.id}")
+                    try:
+                        from app.services.events_bus import emit as events_emit
+                        await events_emit("lead_created", {"lead_id": lead.id, "tenant_id": tenant_id})
+                    except Exception:
+                        pass
                 await conversation_service.append_user_message(db, conv.id, text, raw_json=msg, external_message_id=msg_id or None)
                 log.info(f"[WA][CHAT] conv_id={conv.id} tenant_id={tenant_id} from={from_wa_id} stored user msg")
 

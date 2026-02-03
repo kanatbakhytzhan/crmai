@@ -2,6 +2,7 @@
 CRUD операции для работы с базой данных (Async)
 """
 from sqlalchemy import select, func, and_
+from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
@@ -10,6 +11,7 @@ from datetime import datetime, timedelta
 from app.database.models import (
     User, BotUser, Message, Lead, LeadStatus, LeadComment, Tenant, TenantUser, WhatsAppAccount,
     Conversation, ConversationMessage, ChatMute, ChatAIState,
+    Pipeline, PipelineStage, LeadTask,
 )
 from app.core.security import get_password_hash
 
@@ -281,6 +283,8 @@ async def create_lead(
     db.add(lead)
     await db.commit()
     await db.refresh(lead)
+    if tenant_id:
+        await apply_default_pipeline_to_lead(db, lead)
     return lead
 
 
@@ -684,6 +688,331 @@ async def delete_lead_comment(db: AsyncSession, comment_id: int) -> bool:
         await db.commit()
         return True
     return False
+
+
+# ========== PIPELINES & STAGES (CRM v2) ==========
+
+DEFAULT_PIPELINE_NAME = "Основная"
+DEFAULT_STAGES = [
+    ("Новые", False),
+    ("В работе", False),
+    ("Договорились", False),
+    ("Замер/Встреча", False),
+    ("Смета отправлена", False),
+    ("Успешно (closed won)", True),
+    ("Отказ (closed lost)", True),
+]
+
+
+async def get_or_create_default_pipeline_for_tenant(db: AsyncSession, tenant_id: int):
+    """Вернуть default pipeline tenant; если нет — создать «Основная» и стадии."""
+    result = await db.execute(
+        select(Pipeline).where(Pipeline.tenant_id == tenant_id).where(Pipeline.is_default == True).limit(1)
+    )
+    pipeline = result.scalar_one_or_none()
+    if pipeline:
+        return pipeline
+    pipeline = Pipeline(tenant_id=tenant_id, name=DEFAULT_PIPELINE_NAME, is_default=True)
+    db.add(pipeline)
+    await db.flush()
+    for i, (name, is_closed) in enumerate(DEFAULT_STAGES):
+        stage = PipelineStage(pipeline_id=pipeline.id, name=name, order_index=i, is_closed=is_closed)
+        db.add(stage)
+    await db.commit()
+    await db.refresh(pipeline)
+    return pipeline
+
+
+async def get_default_pipeline_first_stage(db: AsyncSession, tenant_id: int):
+    """Вернуть (default pipeline, первая стадия «Новые») для tenant. Для новых лидов."""
+    pipeline = await get_or_create_default_pipeline_for_tenant(db, tenant_id)
+    if not pipeline:
+        return None, None
+    result = await db.execute(
+        select(PipelineStage)
+        .where(PipelineStage.pipeline_id == pipeline.id)
+        .order_by(PipelineStage.order_index.asc())
+        .limit(1)
+    )
+    stage = result.scalar_one_or_none()
+    return pipeline, stage
+
+
+async def apply_default_pipeline_to_lead(db: AsyncSession, lead: Lead) -> None:
+    """Если у лида есть tenant_id и нет stage_id — поставить default pipeline и стадию «Новые»."""
+    if not getattr(lead, "tenant_id", None) or getattr(lead, "stage_id", None):
+        return
+    pipeline, stage = await get_default_pipeline_first_stage(db, lead.tenant_id)
+    if pipeline and stage:
+        lead.pipeline_id = pipeline.id
+        lead.stage_id = stage.id
+        lead.moved_to_stage_at = datetime.utcnow()
+        await db.commit()
+        await db.refresh(lead)
+
+
+async def list_pipelines_for_tenant(db: AsyncSession, tenant_id: int) -> List[Pipeline]:
+    """Список воронок tenant с подгрузкой стадий."""
+    result = await db.execute(
+        select(Pipeline)
+        .where(Pipeline.tenant_id == tenant_id)
+        .order_by(Pipeline.id.asc())
+        .options(selectinload(Pipeline.stages))
+    )
+    return list(result.scalars().all())
+
+
+async def get_pipeline_by_id(db: AsyncSession, pipeline_id: int, tenant_id: int) -> Optional[Pipeline]:
+    """Воронка по ID с проверкой tenant."""
+    result = await db.execute(
+        select(Pipeline).where(Pipeline.id == pipeline_id).where(Pipeline.tenant_id == tenant_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def create_pipeline(db: AsyncSession, tenant_id: int, name: str, is_default: bool = False) -> Pipeline:
+    """Создать воронку. Если is_default — снять default с остальных."""
+    pipeline = Pipeline(tenant_id=tenant_id, name=(name or "").strip() or DEFAULT_PIPELINE_NAME, is_default=is_default)
+    db.add(pipeline)
+    await db.flush()
+    if is_default:
+        await db.execute(
+            select(Pipeline).where(Pipeline.tenant_id == tenant_id).where(Pipeline.id != pipeline.id)
+        )
+        for p in (await db.execute(select(Pipeline).where(Pipeline.tenant_id == tenant_id).where(Pipeline.id != pipeline.id))).scalars().all():
+            p.is_default = False
+    await db.commit()
+    await db.refresh(pipeline)
+    return pipeline
+
+
+async def update_pipeline(
+    db: AsyncSession, pipeline_id: int, tenant_id: int, name: Optional[str] = None, is_default: Optional[bool] = None
+) -> Optional[Pipeline]:
+    """Обновить воронку."""
+    pipeline = await get_pipeline_by_id(db, pipeline_id, tenant_id)
+    if not pipeline:
+        return None
+    if name is not None:
+        pipeline.name = (name or "").strip() or pipeline.name
+    if is_default is not None and is_default:
+        for p in await list_pipelines_for_tenant(db, tenant_id):
+            p.is_default = p.id == pipeline_id
+        pipeline.is_default = True
+    await db.commit()
+    await db.refresh(pipeline)
+    return pipeline
+
+
+async def get_pipeline_stage_by_id(db: AsyncSession, stage_id: int, tenant_id: int) -> Optional[PipelineStage]:
+    """Стадия по ID с проверкой через pipeline.tenant_id."""
+    result = await db.execute(
+        select(PipelineStage)
+        .join(Pipeline, PipelineStage.pipeline_id == Pipeline.id)
+        .where(PipelineStage.id == stage_id)
+        .where(Pipeline.tenant_id == tenant_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def create_pipeline_stage(
+    db: AsyncSession, pipeline_id: int, tenant_id: int, name: str, order_index: Optional[int] = None, color: Optional[str] = None, is_closed: bool = False
+) -> Optional[PipelineStage]:
+    """Добавить стадию в воронку."""
+    pipeline = await get_pipeline_by_id(db, pipeline_id, tenant_id)
+    if not pipeline:
+        return None
+    if order_index is None:
+        result = await db.execute(
+            select(func.coalesce(func.max(PipelineStage.order_index), -1) + 1).where(PipelineStage.pipeline_id == pipeline_id)
+        )
+        order_index = result.scalar_one() or 0
+    stage = PipelineStage(pipeline_id=pipeline_id, name=(name or "").strip() or "Stage", order_index=order_index, color=color, is_closed=is_closed)
+    db.add(stage)
+    await db.commit()
+    await db.refresh(stage)
+    return stage
+
+
+async def update_pipeline_stage(
+    db: AsyncSession, stage_id: int, tenant_id: int,
+    name: Optional[str] = None, order_index: Optional[int] = None, color: Optional[str] = None, is_closed: Optional[bool] = None,
+) -> Optional[PipelineStage]:
+    """Обновить стадию."""
+    stage = await get_pipeline_stage_by_id(db, stage_id, tenant_id)
+    if not stage:
+        return None
+    if name is not None:
+        stage.name = (name or "").strip() or stage.name
+    if order_index is not None:
+        stage.order_index = order_index
+    if color is not None:
+        stage.color = color
+    if is_closed is not None:
+        stage.is_closed = is_closed
+    await db.commit()
+    await db.refresh(stage)
+    return stage
+
+
+async def delete_pipeline_stage(db: AsyncSession, stage_id: int, tenant_id: int) -> tuple[bool, str]:
+    """Удалить стадию. Если есть лиды на этой стадии — вернуть (False, message)."""
+    stage = await get_pipeline_stage_by_id(db, stage_id, tenant_id)
+    if not stage:
+        return False, "not_found"
+    result = await db.execute(select(Lead).where(Lead.stage_id == stage_id).limit(1))
+    if result.scalar_one_or_none():
+        return False, "stage_has_leads"
+    await db.delete(stage)
+    await db.commit()
+    return True, "ok"
+
+
+async def move_lead_stage(
+    db: AsyncSession, lead_id: int, stage_id: int, current_user_id: int,
+    *,
+    multitenant_include_tenant_leads: bool = False,
+    only_if_assigned_to_me: bool = False,
+) -> Optional[Lead]:
+    """Переместить лид в стадию. only_if_assigned_to_me: manager может только для своих."""
+    lead = await get_lead_by_id(db, lead_id, current_user_id, multitenant_include_tenant_leads=multitenant_include_tenant_leads)
+    if not lead or not lead.tenant_id:
+        return None
+    stage = await get_pipeline_stage_by_id(db, stage_id, lead.tenant_id)
+    if not stage:
+        return None
+    if only_if_assigned_to_me and getattr(lead, "assigned_user_id", None) != current_user_id:
+        return None
+    if lead.pipeline_id != stage.pipeline_id:
+        lead.pipeline_id = stage.pipeline_id
+    lead.stage_id = stage_id
+    lead.moved_to_stage_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(lead)
+    return lead
+
+
+# ========== LEAD TASKS (CRM v2) ==========
+
+async def create_lead_task(
+    db: AsyncSession,
+    lead_id: int,
+    tenant_id: int,
+    assigned_to_user_id: int,
+    task_type: str,
+    due_at: datetime,
+    note: Optional[str] = None,
+) -> Optional[LeadTask]:
+    """Создать задачу по лиду."""
+    result = await db.execute(select(Lead).where(Lead.id == lead_id).where(Lead.tenant_id == tenant_id))
+    if not result.scalar_one_or_none():
+        return None
+    task = LeadTask(
+        lead_id=lead_id,
+        tenant_id=tenant_id,
+        assigned_to_user_id=assigned_to_user_id,
+        type=(task_type or "call").strip().lower() if task_type else "call",
+        due_at=due_at,
+        status="open",
+        note=(note or "").strip() or None,
+    )
+    db.add(task)
+    await db.commit()
+    await db.refresh(task)
+    return task
+
+
+async def get_lead_tasks(db: AsyncSession, lead_id: int, tenant_id: Optional[int] = None) -> List[LeadTask]:
+    """Задачи по лиду (опционально фильтр по tenant)."""
+    q = select(LeadTask).where(LeadTask.lead_id == lead_id)
+    if tenant_id is not None:
+        q = q.where(LeadTask.tenant_id == tenant_id)
+    q = q.order_by(LeadTask.due_at.asc())
+    result = await db.execute(q)
+    return list(result.scalars().all())
+
+
+async def get_lead_task_by_id(db: AsyncSession, task_id: int, tenant_id: Optional[int] = None) -> Optional[LeadTask]:
+    """Задача по ID."""
+    q = select(LeadTask).where(LeadTask.id == task_id)
+    if tenant_id is not None:
+        q = q.where(LeadTask.tenant_id == tenant_id)
+    result = await db.execute(q)
+    return result.scalar_one_or_none()
+
+
+async def update_lead_task(
+    db: AsyncSession, task_id: int, tenant_id: int,
+    status: Optional[str] = None, due_at: Optional[datetime] = None, note: Optional[str] = None,
+) -> Optional[LeadTask]:
+    """Обновить задачу."""
+    task = await get_lead_task_by_id(db, task_id, tenant_id)
+    if not task:
+        return None
+    if status is not None:
+        task.status = (status or "").strip().lower() or task.status
+        if task.status == "done":
+            task.done_at = datetime.utcnow()
+        elif task.status != "done":
+            task.done_at = None
+    if due_at is not None:
+        task.due_at = due_at
+    if note is not None:
+        task.note = (note or "").strip() or None
+    await db.commit()
+    await db.refresh(task)
+    return task
+
+
+async def get_tasks_for_user(
+    db: AsyncSession,
+    user_id: int,
+    tenant_id: Optional[int] = None,
+    status: str = "open",
+    due_filter: Optional[str] = None,
+    limit: int = 200,
+) -> List[LeadTask]:
+    """Задачи пользователя. due_filter: today | overdue | week."""
+    q = select(LeadTask).where(LeadTask.assigned_to_user_id == user_id).where(LeadTask.status == status)
+    if tenant_id is not None:
+        q = q.where(LeadTask.tenant_id == tenant_id)
+    now = datetime.utcnow()
+    if due_filter == "today":
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+        q = q.where(LeadTask.due_at >= start).where(LeadTask.due_at < end)
+    elif due_filter == "overdue":
+        q = q.where(LeadTask.due_at < now)
+    elif due_filter == "week":
+        end_week = now + timedelta(days=7)
+        q = q.where(LeadTask.due_at >= now).where(LeadTask.due_at <= end_week)
+    q = q.order_by(LeadTask.due_at.asc()).limit(limit)
+    result = await db.execute(q)
+    return list(result.scalars().all())
+
+
+async def get_tasks_for_tenant(
+    db: AsyncSession,
+    tenant_id: int,
+    status: str = "open",
+    due_filter: Optional[str] = None,
+    limit: int = 200,
+) -> List[LeadTask]:
+    """Задачи по tenant (для owner/rop: все задачи воронки)."""
+    q = select(LeadTask).where(LeadTask.tenant_id == tenant_id).where(LeadTask.status == status)
+    now = datetime.utcnow()
+    if due_filter == "today":
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+        q = q.where(LeadTask.due_at >= start).where(LeadTask.due_at < end)
+    elif due_filter == "overdue":
+        q = q.where(LeadTask.due_at < now)
+    elif due_filter == "week":
+        end_week = now + timedelta(days=7)
+        q = q.where(LeadTask.due_at >= now).where(LeadTask.due_at <= end_week)
+    q = q.order_by(LeadTask.due_at.asc()).limit(limit)
+    result = await db.execute(q)
+    return list(result.scalars().all())
 
 
 # ========== TENANT (multi-tenant) ==========
@@ -1253,6 +1582,7 @@ async def create_lead_from_whatsapp(
     db.add(lead)
     await db.commit()
     await db.refresh(lead)
+    await apply_default_pipeline_to_lead(db, lead)
     return lead
 
 

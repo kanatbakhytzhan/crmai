@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_db
 from app.database import crud
 from app.services import chatflow_client, conversation_service, openai_service
+from app.services.events_bus import emit as events_emit
 
 router = APIRouter()
 log = logging.getLogger(__name__)
@@ -384,6 +385,10 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
                         db, active_lead.id, normalized_in_message, phone_from_message=normalized_in_message
                     )
                     log.info("[CHATFLOW] lead created from phone message lead_id=%s", active_lead.id)
+                    try:
+                        await events_emit("lead_created", {"lead_id": active_lead.id, "tenant_id": tenant_id})
+                    except Exception:
+                        pass
         except Exception as e:
             log.warning("[CHATFLOW] phone-from-message: %s", type(e).__name__)
         reply_phone = "Спасибо! Номер записал ✅"
@@ -478,6 +483,10 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
                     await db.commit()
                     await db.refresh(active_lead)
                     log.info("[CHATFLOW] lead updated lead_id=%s", active_lead.id)
+                    try:
+                        await events_emit("lead_updated", {"lead_id": active_lead.id, "tenant_id": tenant_id})
+                    except Exception:
+                        pass
                 else:
                     active_lead = await crud.create_lead(
                         db=db,
@@ -493,6 +502,10 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
                         tenant_id=tenant_id,
                     )
                     log.info("[CHATFLOW] lead created lead_id=%s", active_lead.id)
+                    try:
+                        await events_emit("lead_created", {"lead_id": active_lead.id, "tenant_id": tenant_id})
+                    except Exception:
+                        pass
                 if language == "kk":
                     reply = f"Рақмет, {name}! Сіздің өтінішіңіз қабылданды. Біздің менеджер жақын арада {phone_for_lead} нөміріне хабарласады."
                 else:

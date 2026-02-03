@@ -16,13 +16,17 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.database.session import init_db, drop_all_tables, engine, sync_engine, Base
-from app.api.endpoints import chat, auth, admin_users, admin_tenants, admin_diagnostics, admin_recovery, whatsapp_webhook, chatflow_webhook, me, leads_v2
+from app.api.endpoints import chat, auth, admin_users, admin_tenants, admin_diagnostics, admin_recovery, whatsapp_webhook, chatflow_webhook, me, leads_v2, pipelines, tasks, events
 from app.services.telegram_service import stop_bot
 from app.admin import setup_admin
 
 # ВАЖНО: Импортируем модели, чтобы SQLAlchemy их зарегистрировал в Base.metadata
 # Без этого импорта таблицы не будут созданы!
-from app.database.models import User, BotUser, Message, Lead, LeadComment, Tenant, TenantUser, WhatsAppAccount, Conversation, ConversationMessage, ChatMute, ChatAIState
+from app.database.models import (
+    User, BotUser, Message, Lead, LeadComment, Tenant, TenantUser, WhatsAppAccount,
+    Conversation, ConversationMessage, ChatMute, ChatAIState,
+    Pipeline, PipelineStage, LeadTask,
+)
 from app.api.deps import get_db
 from app.api.endpoints import auth as auth_endpoints
 from app.schemas.auth import Token
@@ -163,6 +167,9 @@ app.include_router(admin_recovery.router, prefix="/api/admin")
 app.include_router(whatsapp_webhook.router, prefix="/api/whatsapp", tags=["WhatsApp Webhook"])
 app.include_router(chatflow_webhook.router, prefix="/api/chatflow", tags=["ChatFlow Webhook"])
 app.include_router(leads_v2.router, prefix="/api/v2", tags=["CRM v2"])
+app.include_router(pipelines.router, prefix="/api", tags=["Pipelines"])
+app.include_router(tasks.router, prefix="/api", tags=["Tasks"])
+app.include_router(events.router, prefix="/api", tags=["Events"])
 
 # Подключение админ-панели (используем СИНХРОННЫЙ engine!)
 setup_admin(app, sync_engine)

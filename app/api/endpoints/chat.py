@@ -20,8 +20,10 @@ from app.schemas.lead import (
     LeadAssignBody,
     LeadBulkAssignBody,
     LeadPatchBody,
+    LeadStageBody,
 )
 from app.services import openai_service, telegram_service, conversation_service
+from app.services.events_bus import emit as events_emit
 
 router = APIRouter()
 
@@ -192,7 +194,10 @@ async def chat(
                 )
                 # Диагностика: лид создан с owner_id и status=new — должен попасть в GET /api/leads для этого владельца
                 print(f"[OK] Lid sozdan: id={lead.id}, owner_id={lead.owner_id}, status={getattr(lead.status, 'value', lead.status)}")
-                
+                try:
+                    await events_emit("lead_created", {"lead_id": lead.id, "tenant_id": getattr(lead, "tenant_id", None)})
+                except Exception:
+                    pass
                 # Отправляем уведомление в Telegram
                 try:
                     await telegram_service.send_lead_notification(
@@ -345,6 +350,10 @@ async def update_lead(
     )
     if not lead:
         raise HTTPException(status_code=404, detail=f"Lead with ID {lead_id} not found")
+    try:
+        await events_emit("lead_updated", {"lead_id": lead.id, "tenant_id": getattr(lead, "tenant_id", None)})
+    except Exception:
+        pass
     return {"ok": True, "lead": LeadResponse.model_validate(lead).model_dump()}
 
 
@@ -382,6 +391,10 @@ async def assign_lead(
     out = LeadResponse.model_validate(updated).model_dump()
     out["assigned_to_user_id"] = getattr(updated, "assigned_user_id", None)
     out["assigned_at"] = getattr(updated, "assigned_at", None)
+    try:
+        await events_emit("lead_updated", {"lead_id": updated.id, "tenant_id": getattr(updated, "tenant_id", None)})
+    except Exception:
+        pass
     return {"ok": True, "lead": out}
 
 
@@ -403,6 +416,45 @@ async def unassign_lead(
     out = LeadResponse.model_validate(updated).model_dump()
     out["assigned_to_user_id"] = None
     out["assigned_at"] = None
+    try:
+        await events_emit("lead_updated", {"lead_id": updated.id, "tenant_id": getattr(updated, "tenant_id", None)})
+    except Exception:
+        pass
+    return {"ok": True, "lead": out}
+
+
+@router.patch("/leads/{lead_id}/stage", response_model=dict)
+async def update_lead_stage(
+    lead_id: int,
+    body: LeadStageBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Переместить лид в стадию воронки. Manager — только для лидов, назначенных ему.
+    owner/rop/admin — для всех лидов tenant.
+    """
+    multitenant = (getattr(get_settings(), "multitenant_enabled", "false") or "false").upper() == "TRUE"
+    lead = await crud.get_lead_by_id(db, lead_id, current_user.id, multitenant_include_tenant_leads=multitenant)
+    if not lead or not lead.tenant_id:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    role = await crud.get_tenant_user_role(db, lead.tenant_id, current_user.id)
+    only_if_assigned_to_me = role == "manager"
+    updated = await crud.move_lead_stage(
+        db, lead_id, body.stage_id, current_user.id,
+        multitenant_include_tenant_leads=multitenant,
+        only_if_assigned_to_me=only_if_assigned_to_me,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Lead not found or stage invalid or no permission")
+    out = LeadResponse.model_validate(updated).model_dump()
+    out["pipeline_id"] = getattr(updated, "pipeline_id", None)
+    out["stage_id"] = getattr(updated, "stage_id", None)
+    out["moved_to_stage_at"] = getattr(updated, "moved_to_stage_at", None)
+    try:
+        await events_emit("lead_updated", {"lead_id": updated.id, "tenant_id": getattr(updated, "tenant_id", None)})
+    except Exception:
+        pass
     return {"ok": True, "lead": out}
 
 
@@ -566,6 +618,10 @@ async def create_lead_comment(
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
     comment = await crud.create_lead_comment(db, lead_id=lead_id, user_id=current_user.id, text=body.text)
+    try:
+        await events_emit("lead_updated", {"lead_id": lead_id, "tenant_id": getattr(lead, "tenant_id", None)})
+    except Exception:
+        pass
     return comment
 
 

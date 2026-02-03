@@ -26,6 +26,7 @@ class Tenant(Base):
 
     whatsapp_accounts = relationship("WhatsAppAccount", back_populates="tenant", cascade="all, delete-orphan")
     tenant_users = relationship("TenantUser", back_populates="tenant", cascade="all, delete-orphan")
+    pipelines = relationship("Pipeline", back_populates="tenant", cascade="all, delete-orphan")
 
 
 class TenantUser(Base):
@@ -68,6 +69,35 @@ class WhatsAppAccount(Base):
             return None
         s = str(t).strip()
         return s[:4] + "***" if len(s) > 4 else "***"
+
+
+class Pipeline(Base):
+    """Воронка (CRM v2). У каждого tenant может быть default pipeline."""
+    __tablename__ = "pipelines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    name = Column(String(255), nullable=False)
+    is_default = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    tenant = relationship("Tenant", back_populates="pipelines")
+    stages = relationship("PipelineStage", back_populates="pipeline", cascade="all, delete-orphan", order_by="PipelineStage.order_index")
+
+
+class PipelineStage(Base):
+    """Стадия воронки."""
+    __tablename__ = "pipeline_stages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    pipeline_id = Column(Integer, ForeignKey("pipelines.id"), nullable=False)
+    name = Column(String(255), nullable=False)
+    order_index = Column(Integer, default=0, nullable=False)
+    color = Column(String(32), nullable=True)
+    is_closed = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    pipeline = relationship("Pipeline", back_populates="stages")
 
 
 class Conversation(Base):
@@ -212,6 +242,9 @@ class Lead(Base):
     assigned_at = Column(DateTime, nullable=True)    # когда назначили
     next_call_at = Column(DateTime, nullable=True)   # когда перезвонить
     last_contact_at = Column(DateTime, nullable=True)  # последнее касание
+    pipeline_id = Column(Integer, ForeignKey("pipelines.id"), nullable=True)  # CRM v2 воронка
+    stage_id = Column(Integer, ForeignKey("pipeline_stages.id"), nullable=True)
+    moved_to_stage_at = Column(DateTime, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -221,6 +254,9 @@ class Lead(Base):
     assigned_user = relationship("User", foreign_keys=[assigned_user_id])
     bot_user = relationship("BotUser", back_populates="leads")
     comments = relationship("LeadComment", back_populates="lead", cascade="all, delete-orphan")
+    pipeline = relationship("Pipeline", backref="leads")
+    stage = relationship("PipelineStage", backref="leads")
+    tasks = relationship("LeadTask", back_populates="lead", cascade="all, delete-orphan")
 
 
 class LeadComment(Base):
@@ -235,6 +271,25 @@ class LeadComment(Base):
 
     lead = relationship("Lead", back_populates="comments")
     user = relationship("User", backref="lead_comments")
+
+
+class LeadTask(Base):
+    """Задача/напоминание по лиду (follow-up): звонок, встреча, заметка."""
+    __tablename__ = "lead_tasks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=False)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    assigned_to_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    type = Column(String(32), nullable=False)  # call, meeting, note
+    due_at = Column(DateTime, nullable=False)
+    status = Column(String(32), default="open", nullable=False)  # open, done, cancelled
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    done_at = Column(DateTime, nullable=True)
+
+    lead = relationship("Lead", back_populates="tasks")
+    assigned_user = relationship("User", backref="lead_tasks")
 
 
 class ChatMute(Base):

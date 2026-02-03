@@ -57,6 +57,7 @@ class LeadResponse(BaseModel):
     status: str  # "new", "in_progress", "done", "cancelled" — для CRM
     created_at: datetime
     last_comment: Optional[str] = None  # preview последнего комментария (до 100 символов)
+    lead_number: Optional[int] = None  # CRM v2: порядковый номер лида
 
     model_config = {"from_attributes": True}
 

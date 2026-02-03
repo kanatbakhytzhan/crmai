@@ -1,7 +1,7 @@
 """
 CRUD операции для работы с базой данных (Async)
 """
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
@@ -185,6 +185,12 @@ async def get_bot_user_messages(db: AsyncSession, bot_user_id: int, limit: int =
 
 # ========== LEAD ==========
 
+async def get_next_lead_number(db: AsyncSession) -> int:
+    """Следующий порядковый номер лида (max(lead_number)+1). Глобально; при MULTITENANT в будущем можно по tenant."""
+    result = await db.execute(select(func.coalesce(func.max(Lead.lead_number), 0) + 1))
+    return result.scalar_one() or 1
+
+
 async def create_lead(
     db: AsyncSession,
     owner_id: int,
@@ -198,7 +204,8 @@ async def create_lead(
     area: str = "",
     tenant_id: Optional[int] = None,
 ) -> Lead:
-    """Создать новую заявку (лид). tenant_id опционален (multi-tenant)."""
+    """Создать новую заявку (лид). tenant_id опционален (multi-tenant). lead_number выставляется автоматически (max+1)."""
+    next_num = await get_next_lead_number(db)
     lead = Lead(
         owner_id=owner_id,
         bot_user_id=bot_user_id,
@@ -211,6 +218,7 @@ async def create_lead(
         language=language,
         status=LeadStatus.NEW,
         tenant_id=tenant_id,
+        lead_number=next_num,
     )
     db.add(lead)
     await db.commit()
@@ -1011,6 +1019,7 @@ async def create_lead_from_whatsapp(
         owner_id = first_user.id
     wa_user_id = f"wa_{from_wa_id}" if from_wa_id else "wa_unknown"
     bot_user = await get_or_create_bot_user(db, user_id=wa_user_id, owner_id=owner_id)
+    next_num = await get_next_lead_number(db)
     lead = Lead(
         owner_id=owner_id,
         bot_user_id=bot_user.id,
@@ -1020,6 +1029,7 @@ async def create_lead_from_whatsapp(
         summary=message_text or "(no text)",
         language="ru",
         status=LeadStatus.NEW,
+        lead_number=next_num,
     )
     db.add(lead)
     await db.commit()

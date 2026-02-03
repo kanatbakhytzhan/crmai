@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     # Публичный URL приложения (для webhook_url в админке). Например https://api.example.com
     public_base_url: Optional[str] = None
     
+    # CRM v2 (feature-flag): нумерация лидов, GET /api/v2/leads/table
+    crm_v2_enabled: str = "false"  # "true" — включить v2 API и lead_number
+
     # Multi-tenant + WhatsApp (подготовка)
     multitenant_enabled: str = "false"  # "true" — фильтр лидов по tenant
     whatsapp_enabled: str = "false"     # "true" — включить webhook WhatsApp

@@ -201,7 +201,8 @@ class Lead(Base):
     language = Column(String, default="ru")
     status = Column(SQLEnum(LeadStatus), default=LeadStatus.NEW)
     telegram_message_id = Column(Integer, nullable=True)
-    
+    lead_number = Column(Integer, nullable=True, index=True)  # CRM v2: порядковый номер (max+1 при создании)
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     

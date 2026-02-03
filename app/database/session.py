@@ -318,6 +318,28 @@ async def init_db():
                 print("[OK] Kolonka leads.phone_from_message proverena/dobavlena")
             except Exception as e:
                 print(f"[WARN] leads.phone_from_message migration: {type(e).__name__}: {e}")
+            # leads.lead_number (CRM v2: порядковый номер лида)
+            try:
+                await conn.execute(text(
+                    "ALTER TABLE leads ADD COLUMN IF NOT EXISTS lead_number INTEGER"
+                ))
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_leads_lead_number ON leads(lead_number) WHERE lead_number IS NOT NULL"
+                ))
+                print("[OK] Kolonka leads.lead_number proverena/dobavlena")
+            except Exception as e:
+                print(f"[WARN] leads.lead_number migration: {type(e).__name__}: {e}")
+    if "sqlite" in db_url:
+        try:
+            await conn.execute(text(
+                "ALTER TABLE leads ADD COLUMN lead_number INTEGER"
+            ))
+            print("[OK] SQLite: kolonka leads.lead_number dobavlena")
+        except Exception as e:
+            if "duplicate column" in str(e).lower():
+                print("[OK] SQLite: leads.lead_number uzhe est")
+            else:
+                print(f"[WARN] leads.lead_number SQLite: {type(e).__name__}: {e}")
     print("[OK] Baza dannyh initializirovana")
 
 

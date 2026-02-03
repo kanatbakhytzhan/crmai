@@ -79,6 +79,11 @@ class Settings(BaseSettings):
     whatsapp_api_version: str = "v20.0"
     whatsapp_graph_base: str = "https://graph.facebook.com"
 
+    # AmoCRM OAuth (Universal Admin Console)
+    amo_client_id: Optional[str] = None
+    amo_client_secret: Optional[str] = None
+    amo_redirect_url: Optional[str] = None  # e.g. https://your-api.com/api/integrations/amocrm/callback
+
     class Config:
         env_file = ".env"
         case_sensitive = False

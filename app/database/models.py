@@ -129,7 +129,13 @@ class User(Base):
     
     # Relationships
     bot_users = relationship("BotUser", back_populates="owner", cascade="all, delete-orphan")
-    leads = relationship("Lead", back_populates="owner", cascade="all, delete-orphan")
+    leads = relationship(
+        "Lead",
+        back_populates="owner",
+        cascade="all, delete-orphan",
+        primaryjoin="User.id == Lead.owner_id",
+        foreign_keys="[Lead.owner_id]",
+    )
 
 
 class BotUser(Base):

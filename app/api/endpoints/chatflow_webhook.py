@@ -427,9 +427,14 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
         except Exception as e:
             log.warning("[CHATFLOW] update lead phone: %s", type(e).__name__)
 
-    # AI отвечает только если tenant.ai_enabled и chat_ai_state для этого чата (remoteJid) включён
+    # AI отвечает только если tenant.ai_enabled_global (глобальный) и chat_ai_state для этого чата включён
+    # ai_enabled_global — новый Universal Admin Console флаг (главный выключатель AI)
+    ai_enabled_global = getattr(tenant, "ai_enabled_global", True) if tenant else True
     chat_ai_enabled = await crud.get_chat_ai_state(db, tenant_id, remote_jid)
-    log.info("[CHATFLOW] tenant_id=%s remoteJid=...%s msg_id=%s ai_enabled_global=%s ai_muted_in_chat=%s", tenant_id, jid_safe, msg_id, ai_enabled, not chat_ai_enabled)
+    log.info("[CHATFLOW] tenant_id=%s remoteJid=...%s msg_id=%s ai_enabled_global=%s ai_muted_in_chat=%s", tenant_id, jid_safe, msg_id, ai_enabled_global, not chat_ai_enabled)
+    if not ai_enabled_global:
+        log.info("[AI] skipped reply tenant=%s reason=ai_enabled_global=false", tenant_id)
+        return {"ok": True}
     if not ai_enabled:
         log.info("[AI] skipped reply tenant=%s reason=tenant_disabled", tenant_id)
         return {"ok": True}

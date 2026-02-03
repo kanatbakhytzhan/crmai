@@ -11,6 +11,16 @@
    - PostgreSQL: `SELECT id, lead_number, name, created_at FROM leads ORDER BY id DESC LIMIT 5;`
    - У новых лидов `lead_number` заполнен (1, 2, 3, …), у старых может быть `NULL`.
 5. **Таблица v2 (при CRM_V2_ENABLED=true):**  
-   `GET /api/v2/leads/table` с JWT админа — в `rows[]` у каждого лида есть поле `lead_number`.
+   `GET /api/v2/leads/table` с JWT админа. **Основной ключ ответа — `leads`** (как в GET /api/leads). Поле `rows` дублирует `leads` на один релиз для обратной совместимости.
 
 Старые лиды не трогаются: у них `lead_number` остаётся `NULL`. Новые получают `max(lead_number)+1`.
+
+---
+
+## Единый контракт списка лидов (Swagger/API)
+
+Оба эндпоинта возвращают массив лидов под ключом **`leads`** и счётчик **`total`**:
+
+- **GET /api/leads** → `{ "leads": [...], "total": N }`
+- **GET /api/v2/leads/table** → `{ "ok": true, "leads": [...], "rows": [...], "total": N }`  
+  Основной ключ — **`leads`**. Поле `rows` — дубликат (deprecated), будет удалён. В Swagger описание указано в response schema и в summary эндпоинта.

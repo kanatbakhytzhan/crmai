@@ -31,13 +31,27 @@ class LeadTableRow(BaseModel):
         from_attributes = True
 
 
-@router.get("/leads/table", response_model=dict)
+class LeadsTableResponse(BaseModel):
+    """Единый контракт списка лидов: основной ключ — leads (как в GET /api/leads). rows — дубликат на один релиз для обратной совместимости."""
+    ok: bool = True
+    leads: list[LeadTableRow]  # основной ключ (как в GET /api/leads)
+    rows: list[LeadTableRow]   # deprecated: дубликат leads, будет удалён
+    total: int
+
+
+@router.get(
+    "/leads/table",
+    response_model=LeadsTableResponse,
+    summary="Список лидов для таблицы (v2)",
+    response_description="**Основной ключ — `leads`** (как в GET /api/leads). Поле `rows` — дубликат для обратной совместимости, будет удалён.",
+)
 async def get_leads_table(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_admin),
 ):
     """
     Лиды в формате для таблицы: lead_number, name, phone, city, object_type, area, status, created_at.
+    Контракт совпадает с GET /api/leads: **{ leads, total }**. Дополнительно возвращаются `ok` и `rows` (rows = leads, на один релиз).
     Только для ROP/Admin. Доступно только при CRM_V2_ENABLED=true.
     """
     settings = get_settings()
@@ -50,10 +64,10 @@ async def get_leads_table(
         limit=1000,
         multitenant_include_tenant_leads=multitenant,
     )
-    rows = []
+    items = []
     for l in leads:
         status_str = l.status.value if hasattr(l.status, "value") else str(l.status or "new")
-        rows.append(
+        items.append(
             LeadTableRow(
                 lead_number=getattr(l, "lead_number", None),
                 name=l.name or "",
@@ -65,4 +79,4 @@ async def get_leads_table(
                 created_at=l.created_at,
             )
         )
-    return {"ok": True, "rows": [r.model_dump() for r in rows], "total": len(rows)}
+    return LeadsTableResponse(ok=True, leads=items, rows=items, total=len(items))

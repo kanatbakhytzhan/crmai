@@ -22,11 +22,16 @@ class Tenant(Base):
     ai_prompt = Column(Text, nullable=True)  # кастомный system prompt для OpenAI (если пусто — дефолтный)
     ai_enabled = Column(Boolean, default=True, nullable=False)  # автоответ AI вкл/выкл (команды /start /stop)
     webhook_key = Column(String(64), unique=True, index=True, nullable=True)  # UUID для POST /api/chatflow/webhook/{key}
+    # Universal Admin Console fields:
+    whatsapp_source = Column(String(32), default="chatflow", nullable=False)  # chatflow | amomarket
+    ai_enabled_global = Column(Boolean, default=True, nullable=False)  # глобальный включатель AI
+    ai_after_lead_submitted_behavior = Column(String(64), default="polite_close", nullable=True)  # polite_close | continue | silent
     created_at = Column(DateTime, default=datetime.utcnow)
 
     whatsapp_accounts = relationship("WhatsAppAccount", back_populates="tenant", cascade="all, delete-orphan")
     tenant_users = relationship("TenantUser", back_populates="tenant", cascade="all, delete-orphan")
     pipelines = relationship("Pipeline", back_populates="tenant", cascade="all, delete-orphan")
+    integrations = relationship("TenantIntegration", back_populates="tenant", cascade="all, delete-orphan")
 
 
 class TenantUser(Base):
@@ -45,6 +50,55 @@ class TenantUser(Base):
     tenant = relationship("Tenant", back_populates="tenant_users")
     user = relationship("User", backref="tenant_users", foreign_keys=[user_id])
     parent = relationship("User", foreign_keys=[parent_user_id])
+
+
+class TenantIntegration(Base):
+    """Интеграция tenant с внешним провайдером (amoCRM и др.)."""
+    __tablename__ = "tenant_integrations"
+    __table_args__ = (UniqueConstraint("tenant_id", "provider", name="uq_tenant_integrations_tenant_provider"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    provider = Column(String(32), nullable=False)  # amocrm
+    is_active = Column(Boolean, default=True, nullable=False)
+    base_domain = Column(String(255), nullable=True)  # example.amocrm.ru
+    access_token = Column(Text, nullable=True)  # encrypted/stored securely
+    refresh_token = Column(Text, nullable=True)
+    token_expires_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    tenant = relationship("Tenant", back_populates="integrations")
+
+
+class TenantPipelineMapping(Base):
+    """Маппинг нашего stage_key на stage_id в amoCRM."""
+    __tablename__ = "tenant_pipeline_mappings"
+    __table_args__ = (UniqueConstraint("tenant_id", "provider", "stage_key", name="uq_tenant_pipeline_mapping"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    provider = Column(String(32), nullable=False)  # amocrm
+    pipeline_id = Column(String(64), nullable=True)  # id воронки в amoCRM
+    stage_key = Column(String(64), nullable=False)  # unprocessed, in_work, ready_call_1, etc.
+    stage_id = Column(String(64), nullable=True)  # id стадии в amoCRM
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class TenantFieldMapping(Base):
+    """Маппинг нашего field_key на amo_field_id в amoCRM."""
+    __tablename__ = "tenant_field_mappings"
+    __table_args__ = (UniqueConstraint("tenant_id", "provider", "field_key", "entity_type", name="uq_tenant_field_mapping"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    provider = Column(String(32), nullable=False)  # amocrm
+    field_key = Column(String(64), nullable=False)  # city, district, object_type, area, etc.
+    amo_field_id = Column(String(64), nullable=True)  # id кастомного поля в amoCRM
+    entity_type = Column(String(32), nullable=False)  # lead | contact
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class WhatsAppAccount(Base):

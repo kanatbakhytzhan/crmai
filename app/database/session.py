@@ -532,6 +532,78 @@ async def init_db():
                 print("[OK] Tablica auto_assign_rules proverena/sozdana")
             except Exception as e:
                 print(f"[WARN] auto_assign_rules create: {type(e).__name__}: {e}")
+            # Universal Admin Console: tenants new columns
+            try:
+                for col, defn in [
+                    ("whatsapp_source", "VARCHAR(32) DEFAULT 'chatflow' NOT NULL"),
+                    ("ai_enabled_global", "BOOLEAN DEFAULT TRUE NOT NULL"),
+                    ("ai_after_lead_submitted_behavior", "VARCHAR(64) DEFAULT 'polite_close'"),
+                ]:
+                    await conn.execute(text(f"ALTER TABLE tenants ADD COLUMN IF NOT EXISTS {col} {defn}"))
+                await conn.execute(text("UPDATE tenants SET whatsapp_source = 'chatflow' WHERE whatsapp_source IS NULL"))
+                await conn.execute(text("UPDATE tenants SET ai_enabled_global = TRUE WHERE ai_enabled_global IS NULL"))
+                print("[OK] Universal Admin: kolonki tenants provereny")
+            except Exception as e:
+                print(f"[WARN] tenants Universal Admin columns: {type(e).__name__}: {e}")
+            # Universal Admin Console: tenant_integrations
+            try:
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS tenant_integrations (
+                        id SERIAL PRIMARY KEY,
+                        tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                        provider VARCHAR(32) NOT NULL,
+                        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                        base_domain VARCHAR(255),
+                        access_token TEXT,
+                        refresh_token TEXT,
+                        token_expires_at TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(tenant_id, provider)
+                    )
+                """))
+                await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tenant_integrations_tenant ON tenant_integrations(tenant_id)"))
+                print("[OK] Tablica tenant_integrations proverena/sozdana")
+            except Exception as e:
+                print(f"[WARN] tenant_integrations create: {type(e).__name__}: {e}")
+            # Universal Admin Console: tenant_pipeline_mappings
+            try:
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS tenant_pipeline_mappings (
+                        id SERIAL PRIMARY KEY,
+                        tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                        provider VARCHAR(32) NOT NULL,
+                        pipeline_id VARCHAR(64),
+                        stage_key VARCHAR(64) NOT NULL,
+                        stage_id VARCHAR(64),
+                        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(tenant_id, provider, stage_key)
+                    )
+                """))
+                await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tenant_pipeline_mappings_tenant ON tenant_pipeline_mappings(tenant_id, provider)"))
+                print("[OK] Tablica tenant_pipeline_mappings proverena/sozdana")
+            except Exception as e:
+                print(f"[WARN] tenant_pipeline_mappings create: {type(e).__name__}: {e}")
+            # Universal Admin Console: tenant_field_mappings
+            try:
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS tenant_field_mappings (
+                        id SERIAL PRIMARY KEY,
+                        tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                        provider VARCHAR(32) NOT NULL,
+                        field_key VARCHAR(64) NOT NULL,
+                        amo_field_id VARCHAR(64),
+                        entity_type VARCHAR(32) NOT NULL,
+                        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(tenant_id, provider, field_key, entity_type)
+                    )
+                """))
+                await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tenant_field_mappings_tenant ON tenant_field_mappings(tenant_id, provider)"))
+                print("[OK] Tablica tenant_field_mappings proverena/sozdana")
+            except Exception as e:
+                print(f"[WARN] tenant_field_mappings create: {type(e).__name__}: {e}")
     if "sqlite" in db_url:
         try:
             await conn.execute(text(
@@ -552,7 +624,7 @@ async def init_db():
                     print(f"[OK] SQLite: leads.{col} uzhe est")
                 else:
                     print(f"[WARN] leads.{col} SQLite: {type(e).__name__}: {e}")
-        # SQLite: lead_events, auto_assign_rules (create_all may have created; raw CREATE IF NOT EXISTS for portability)
+        # SQLite: lead_events, auto_assign_rules, Universal Admin tables
         for tname, sql in [
             ("lead_events", """
                 CREATE TABLE IF NOT EXISTS lead_events (
@@ -586,12 +658,63 @@ async def init_db():
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """),
+            ("tenant_integrations", """
+                CREATE TABLE IF NOT EXISTS tenant_integrations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                    provider VARCHAR(32) NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    base_domain VARCHAR(255),
+                    access_token TEXT,
+                    refresh_token TEXT,
+                    token_expires_at DATETIME,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(tenant_id, provider)
+                )
+            """),
+            ("tenant_pipeline_mappings", """
+                CREATE TABLE IF NOT EXISTS tenant_pipeline_mappings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                    provider VARCHAR(32) NOT NULL,
+                    pipeline_id VARCHAR(64),
+                    stage_key VARCHAR(64) NOT NULL,
+                    stage_id VARCHAR(64),
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(tenant_id, provider, stage_key)
+                )
+            """),
+            ("tenant_field_mappings", """
+                CREATE TABLE IF NOT EXISTS tenant_field_mappings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                    provider VARCHAR(32) NOT NULL,
+                    field_key VARCHAR(64) NOT NULL,
+                    amo_field_id VARCHAR(64),
+                    entity_type VARCHAR(32) NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(tenant_id, provider, field_key, entity_type)
+                )
+            """),
         ]:
             try:
                 await conn.execute(text(sql))
                 print(f"[OK] SQLite: tablica {tname} proverena/sozdana")
             except Exception as e:
                 print(f"[WARN] SQLite {tname}: {type(e).__name__}: {e}")
+        # SQLite: new tenant columns
+        for col, typ in [("whatsapp_source", "VARCHAR(32) DEFAULT 'chatflow'"), ("ai_enabled_global", "INTEGER DEFAULT 1"), ("ai_after_lead_submitted_behavior", "VARCHAR(64) DEFAULT 'polite_close'")]:
+            try:
+                await conn.execute(text(f"ALTER TABLE tenants ADD COLUMN {col} {typ}"))
+                print(f"[OK] SQLite: tenants.{col} dobavlena")
+            except Exception as e:
+                if "duplicate column" in str(e).lower():
+                    print(f"[OK] SQLite: tenants.{col} uzhe est")
+                else:
+                    print(f"[WARN] tenants.{col} SQLite: {type(e).__name__}: {e}")
     print("[OK] Baza dannyh initializirovana")
 
 

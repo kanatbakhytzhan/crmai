@@ -107,3 +107,36 @@ async def get_current_admin(
             detail="Admin access required"
         )
     return current_user
+
+
+async def get_current_admin_or_owner(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Доступ для QA/Diagnostics: admin или владелец любого tenant (owner)."""
+    is_admin = getattr(current_user, "is_admin", False)
+    if is_admin:
+        return current_user
+    tenant = await crud.get_tenant_for_me(db, current_user.id)
+    if tenant:
+        return current_user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Admin or tenant owner access required",
+    )
+
+
+async def get_current_admin_or_owner_or_rop(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Доступ для CRM v3: Import, Reports, Auto Assign — admin или owner/rop в любом tenant."""
+    is_admin = getattr(current_user, "is_admin", False)
+    if is_admin:
+        return current_user
+    if await crud.user_has_owner_or_rop_in_any_tenant(db, current_user.id):
+        return current_user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Admin or owner/rop access required",
+    )

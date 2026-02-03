@@ -60,11 +60,17 @@ class MeAISettingsUpdate(BaseModel):
 
 
 class TenantUserAdd(BaseModel):
-    """POST /api/admin/tenants/{id}/users — добавить пользователя по email."""
-    email: str
-    role: str = "member"  # owner | rop | manager (admin/member — legacy)
-    parent_user_id: Optional[int] = None  # для manager: user_id ROP
+    """POST /api/admin/tenants/{id}/users — добавить пользователя по email. Admin/owner/rop."""
+    email: str = Field(..., description="Email пользователя (создаётся, если нет в системе)")
+    role: str = Field("member", description="owner | rop | manager")
+    parent_user_id: Optional[int] = Field(None, description="Для manager: user_id ROP")
     is_active: Optional[bool] = True
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [{"email": "manager@company.com", "role": "manager", "parent_user_id": 2}]
+        }
+    }
 
 
 class TenantUserPatch(BaseModel):
@@ -90,14 +96,22 @@ class TenantUserResponse(BaseModel):
 
 
 class WhatsAppAccountCreate(BaseModel):
-    """Привязка WhatsApp к tenant. Принимает chatflow_token или token, chatflow_instance_id или instance_id, is_active или active."""
+    """Привязка WhatsApp/ChatFlow к tenant. POST /api/admin/tenants/{id}/whatsapp."""
     phone_number: str = Field("—", validation_alias=AliasChoices("phone_number", "phone"))
     phone_number_id: Optional[str] = None
     verify_token: Optional[str] = None
     waba_id: Optional[str] = None
-    chatflow_token: Optional[str] = Field(None, validation_alias=AliasChoices("chatflow_token", "token"))
-    chatflow_instance_id: Optional[str] = Field(None, validation_alias=AliasChoices("chatflow_instance_id", "instance_id"))
+    chatflow_token: Optional[str] = Field(None, validation_alias=AliasChoices("chatflow_token", "token"), description="Токен ChatFlow")
+    chatflow_instance_id: Optional[str] = Field(None, validation_alias=AliasChoices("chatflow_instance_id", "instance_id"), description="Instance ID из ChatFlow")
     is_active: bool = Field(True, validation_alias=AliasChoices("is_active", "active"))
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {"phone_number": "+77001234567", "chatflow_token": "your_chatflow_token", "chatflow_instance_id": "instance_abc", "is_active": True}
+            ]
+        }
+    }
 
 
 class WhatsAppAccountResponse(BaseModel):
@@ -118,11 +132,17 @@ class WhatsAppAccountResponse(BaseModel):
 
 
 class WhatsAppAccountUpsert(BaseModel):
-    """PUT /api/admin/tenants/{id}/whatsapp — сохранить/обновить привязку. Принимает token/chatflow_token, instance_id/chatflow_instance_id, active/is_active."""
+    """PUT /api/admin/tenants/{id}/whatsapp — сохранить/обновить привязку."""
     chatflow_token: Optional[str] = Field(None, validation_alias=AliasChoices("chatflow_token", "token"))
     chatflow_instance_id: Optional[str] = Field(None, validation_alias=AliasChoices("chatflow_instance_id", "instance_id"))
     phone_number: Optional[str] = Field(None, validation_alias=AliasChoices("phone_number", "phone"))
     is_active: bool = Field(True, validation_alias=AliasChoices("is_active", "active"))
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [{"chatflow_token": "xxx", "chatflow_instance_id": "instance_123", "is_active": True}]
+        }
+    }
 
 
 class WhatsAppSaved(BaseModel):
@@ -133,3 +153,61 @@ class WhatsAppSaved(BaseModel):
     active: bool
     chatflow_instance_id: Optional[str] = None
     chatflow_token: Optional[str] = None  # полное значение, чтобы фронт видел что сохранилось
+
+
+# ========== CRM v3: Auto Assign Rules ==========
+
+class AutoAssignRuleCreate(BaseModel):
+    """POST /api/admin/tenants/{tenant_id}/auto-assign-rules."""
+    name: str
+    is_active: bool = True
+    priority: int = 0
+    match_city: Optional[str] = None
+    match_language: Optional[str] = None
+    match_object_type: Optional[str] = None
+    match_contains: Optional[str] = None
+    time_from: Optional[int] = Field(None, ge=0, le=23)
+    time_to: Optional[int] = Field(None, ge=0, le=23)
+    days_of_week: Optional[str] = None  # "1,2,3,4,5"
+    strategy: str = "round_robin"  # round_robin | least_loaded | fixed_user
+    fixed_user_id: Optional[int] = None
+
+
+class AutoAssignRuleUpdate(BaseModel):
+    """PATCH /api/admin/auto-assign-rules/{rule_id}."""
+    name: Optional[str] = None
+    is_active: Optional[bool] = None
+    priority: Optional[int] = None
+    match_city: Optional[str] = None
+    match_language: Optional[str] = None
+    match_object_type: Optional[str] = None
+    match_contains: Optional[str] = None
+    time_from: Optional[int] = Field(None, ge=0, le=23)
+    time_to: Optional[int] = Field(None, ge=0, le=23)
+    days_of_week: Optional[str] = None
+    strategy: Optional[str] = None
+    fixed_user_id: Optional[int] = None
+
+
+class AutoAssignRuleResponse(BaseModel):
+    """Правило автоназначения для ответа API."""
+    id: int
+    tenant_id: int
+    name: str
+    is_active: bool
+    priority: int
+    match_city: Optional[str] = None
+    match_language: Optional[str] = None
+    match_object_type: Optional[str] = None
+    match_contains: Optional[str] = None
+    time_from: Optional[int] = None
+    time_to: Optional[int] = None
+    days_of_week: Optional[str] = None
+    strategy: str
+    fixed_user_id: Optional[int] = None
+    rr_state: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True

@@ -244,6 +244,11 @@ class Lead(Base):
     lead_number = Column(Integer, nullable=True, index=True)  # CRM v2: порядковый номер (max+1 при создании)
     assigned_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # CRM v2: кому назначен (manager/rop/owner)
     assigned_at = Column(DateTime, nullable=True)    # когда назначили
+    first_response_at = Column(DateTime, nullable=True)  # CRM v3: время первого ответа менеджера
+    first_assigned_at = Column(DateTime, nullable=True)  # CRM v3: время первого назначения
+    source = Column(String(64), nullable=True)  # chatflow, whatsapp, import_amocrm, manual
+    external_source = Column(String(64), nullable=True)  # amocrm
+    external_id = Column(String(255), nullable=True, index=True)  # id во внешней CRM
     next_call_at = Column(DateTime, nullable=True)   # когда перезвонить
     last_contact_at = Column(DateTime, nullable=True)  # последнее касание
     pipeline_id = Column(Integer, ForeignKey("pipelines.id"), nullable=True)  # CRM v2 воронка
@@ -261,6 +266,42 @@ class Lead(Base):
     pipeline = relationship("Pipeline", backref="leads")
     stage = relationship("PipelineStage", backref="leads")
     tasks = relationship("LeadTask", back_populates="lead", cascade="all, delete-orphan")
+
+
+class LeadEvent(Base):
+    """CRM v3: лог событий по лиду (для отчётов)."""
+    __tablename__ = "lead_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=False)
+    type = Column(String(64), nullable=False)  # created, assigned, unassigned, status_changed, comment_added, called, first_response
+    actor_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    payload = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AutoAssignRule(Base):
+    """CRM v3: правила автоназначения лидов (по городу/языку/объекту/времени/нагрузке, round-robin)."""
+    __tablename__ = "auto_assign_rules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    name = Column(String(255), nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    priority = Column(Integer, default=0, nullable=False)  # чем меньше — тем раньше применяется
+    match_city = Column(String(255), nullable=True)
+    match_language = Column(String(32), nullable=True)  # ru, kk
+    match_object_type = Column(String(255), nullable=True)
+    match_contains = Column(String(512), nullable=True)  # подстрока в summary или первом сообщении
+    time_from = Column(Integer, nullable=True)  # час 0-23
+    time_to = Column(Integer, nullable=True)  # час 0-23
+    days_of_week = Column(String(32), nullable=True)  # 1,2,3,4,5 (пн=1)
+    strategy = Column(String(32), nullable=False)  # round_robin | least_loaded | fixed_user
+    fixed_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    rr_state = Column(Integer, default=0, nullable=False)  # указатель round-robin
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class LeadComment(Base):

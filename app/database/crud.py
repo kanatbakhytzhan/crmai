@@ -9,7 +9,8 @@ from typing import List, Optional
 from datetime import datetime, timedelta
 
 from app.database.models import (
-    User, BotUser, Message, Lead, LeadStatus, LeadComment, Tenant, TenantUser, WhatsAppAccount,
+    User, BotUser, Message, Lead, LeadStatus, LeadComment, LeadEvent, AutoAssignRule,
+    Tenant, TenantUser, WhatsAppAccount,
     Conversation, ConversationMessage, ChatMute, ChatAIState,
     Pipeline, PipelineStage, LeadTask,
     AIChatMute, AuditLog, Notification,
@@ -250,6 +251,28 @@ async def get_next_lead_number(
     return result.scalar_one() or 1
 
 
+async def create_lead_event(
+    db: AsyncSession,
+    tenant_id: int,
+    lead_id: int,
+    event_type: str,
+    actor_user_id: Optional[int] = None,
+    payload: Optional[dict] = None,
+) -> LeadEvent:
+    """CRM v3: записать событие по лиду (created, assigned, first_response, ...)."""
+    ev = LeadEvent(
+        tenant_id=tenant_id,
+        lead_id=lead_id,
+        type=event_type,
+        actor_user_id=actor_user_id,
+        payload=payload,
+    )
+    db.add(ev)
+    await db.commit()
+    await db.refresh(ev)
+    return ev
+
+
 async def create_lead(
     db: AsyncSession,
     owner_id: int,
@@ -263,8 +286,11 @@ async def create_lead(
     area: str = "",
     tenant_id: Optional[int] = None,
     lead_number: Optional[int] = None,
+    source: Optional[str] = None,
+    external_source: Optional[str] = None,
+    external_id: Optional[str] = None,
 ) -> Lead:
-    """Создать новую заявку (лид). tenant_id опционален. lead_number — автоматически (max+1 в рамках tenant/owner), если не передан."""
+    """Создать новую заявку (лид). tenant_id опционален. lead_number — автоматически (max+1 в рамках tenant/owner), если не передан. CRM v3: source, external_source, external_id."""
     if lead_number is None:
         lead_number = await get_next_lead_number(db, tenant_id=tenant_id, owner_id=owner_id)
     lead = Lead(
@@ -280,12 +306,19 @@ async def create_lead(
         status=LeadStatus.NEW,
         tenant_id=tenant_id,
         lead_number=lead_number,
+        source=source,
+        external_source=external_source,
+        external_id=external_id,
     )
     db.add(lead)
     await db.commit()
     await db.refresh(lead)
     if tenant_id:
         await apply_default_pipeline_to_lead(db, lead)
+        await create_lead_event(
+            db, tenant_id=tenant_id, lead_id=lead.id, event_type="created",
+            payload={"source": source or "manual"},
+        )
     return lead
 
 
@@ -415,6 +448,7 @@ async def update_lead_assignment(
     """
     Назначить лид (owner/rop). Manager не может назначать (вызывающий должен проверить роль).
     assigned_user_id должен быть в tenant_users того же tenant. Lead должен принадлежать tenant.
+    CRM v3: first_assigned_at при первом назначении, lead_event assigned/unassigned.
     """
     lead = await get_lead_by_id(db, lead_id, current_user_id, multitenant_include_tenant_leads=multitenant_include_tenant_leads)
     if not lead or not lead.tenant_id:
@@ -422,17 +456,30 @@ async def update_lead_assignment(
     role = await get_tenant_user_role(db, lead.tenant_id, current_user_id)
     if role not in ("owner", "rop"):
         return None
+    prev_assigned = getattr(lead, "assigned_user_id", None)
+    lead.assigned_user_id = assigned_user_id
+    if status is not None:
+        lead.status = status
     if assigned_user_id is not None:
         target_in_tenant = await get_tenant_user(db, lead.tenant_id, assigned_user_id)
         if not target_in_tenant:
             return None
-        lead.assigned_at = datetime.utcnow()
+        now = datetime.utcnow()
+        lead.assigned_at = now
+        if getattr(lead, "first_assigned_at", None) is None:
+            lead.first_assigned_at = now
+        await db.flush()
+        await create_lead_event(
+            db, tenant_id=lead.tenant_id, lead_id=lead_id, event_type="assigned",
+            actor_user_id=current_user_id, payload={"assigned_to_user_id": assigned_user_id},
+        )
     else:
         lead.assigned_at = None
-    lead.assigned_user_id = assigned_user_id
-    if status is not None:
-        lead.status = status
-    await db.commit()
+        await db.flush()
+        await create_lead_event(
+            db, tenant_id=lead.tenant_id, lead_id=lead_id, event_type="unassigned",
+            actor_user_id=current_user_id, payload={"previous_assigned_user_id": prev_assigned},
+        )
     await db.refresh(lead)
     return lead
 
@@ -625,6 +672,7 @@ async def update_lead_fields(
     """
     PATCH лида. owner/rop: могут менять status, next_call_at, assigned_user_id.
     manager: только status и next_call_at для своих лидов (assigned_user_id = current_user_id).
+    CRM v3: при смене статуса на in_progress — первый «касание» менеджера: first_response_at + lead_event.
     """
     lead = await get_lead_by_id(db, lead_id, current_user_id, multitenant_include_tenant_leads=multitenant_include_tenant_leads)
     if not lead:
@@ -635,6 +683,15 @@ async def update_lead_fields(
     is_owner_rop = role in ("owner", "rop") or (lead.tenant_id and not role and lead.owner_id == current_user_id)
     if status is not None:
         lead.status = status
+        # CRM v3: первый переход в in_progress от manager/rop/owner = first_response
+        if status == LeadStatus.IN_PROGRESS and lead.tenant_id and getattr(lead, "first_response_at", None) is None:
+            if role in ("owner", "rop", "manager"):
+                lead.first_response_at = datetime.utcnow()
+                await db.flush()
+                await create_lead_event(
+                    db, tenant_id=lead.tenant_id, lead_id=lead_id, event_type="first_response",
+                    actor_user_id=current_user_id, payload={"trigger": "status_changed"},
+                )
     if next_call_at is not None:
         lead.next_call_at = next_call_at
     if last_contact_at is not None:
@@ -802,9 +859,26 @@ async def create_lead_comment(
     user_id: int,
     text: str,
 ) -> LeadComment:
-    """Добавить комментарий к лиду."""
+    """Добавить комментарий к лиду. CRM v3: при первом комментарии менеджера/rop/owner выставляет first_response_at и создаёт lead_event first_response."""
     comment = LeadComment(lead_id=lead_id, user_id=user_id, text=(text or "").strip())
     db.add(comment)
+    await db.flush()
+    result = await db.execute(select(Lead).where(Lead.id == lead_id))
+    lead = result.scalar_one_or_none()
+    if lead and lead.tenant_id:
+        if getattr(lead, "first_response_at", None) is None:
+            role = await get_tenant_user_role(db, lead.tenant_id, user_id)
+            if role in ("owner", "rop", "manager"):
+                lead.first_response_at = datetime.utcnow()
+                await db.flush()
+                await create_lead_event(
+                    db, tenant_id=lead.tenant_id, lead_id=lead_id, event_type="first_response",
+                    actor_user_id=user_id, payload={"comment_id": comment.id},
+                )
+        await create_lead_event(
+            db, tenant_id=lead.tenant_id, lead_id=lead_id, event_type="comment_added",
+            actor_user_id=user_id, payload={"comment_id": comment.id},
+        )
     await db.commit()
     await db.refresh(comment)
     return comment
@@ -1374,6 +1448,25 @@ async def list_tenants(db: AsyncSession, active_only: bool = False) -> List[Tena
         q = q.where(Tenant.is_active == True)
     result = await db.execute(q)
     return list(result.scalars().all())
+
+
+async def user_has_owner_or_rop_in_any_tenant(db: AsyncSession, user_id: int) -> bool:
+    """CRM v3: есть ли у пользователя роль owner или rop в каком-либо tenant (для доступа к Import/Reports/Auto Assign)."""
+    # Tenant где default_owner_user_id == user_id
+    result = await db.execute(
+        select(Tenant.id).where(Tenant.default_owner_user_id == user_id).where(Tenant.is_active == True).limit(1)
+    )
+    if result.scalar_one_or_none():
+        return True
+    # tenant_users с role owner или rop
+    result = await db.execute(
+        select(TenantUser.tenant_id)
+        .where(TenantUser.user_id == user_id)
+        .where(TenantUser.role.in_(["owner", "rop"]))
+        .where(TenantUser.is_active == True)
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
 
 
 async def get_tenant_for_me(db: AsyncSession, user_id: int) -> Optional[Tenant]:
@@ -1947,7 +2040,13 @@ async def get_or_create_lead_for_chatflow_jid(
         summary="",
         language="ru",
         tenant_id=tenant_id,
+        source="chatflow",
     )
+    try:
+        from app.services.auto_assign_service import try_auto_assign
+        await try_auto_assign(db, tenant_id, lead, first_message_text=None)
+    except Exception:
+        pass
     return lead
 
 
@@ -1988,11 +2087,18 @@ async def create_lead_from_whatsapp(
         language="ru",
         status=LeadStatus.NEW,
         lead_number=next_num,
+        source="whatsapp",
     )
     db.add(lead)
     await db.commit()
     await db.refresh(lead)
     await apply_default_pipeline_to_lead(db, lead)
+    await create_lead_event(db, tenant_id=tenant_id, lead_id=lead.id, event_type="created", payload={"source": "whatsapp"})
+    try:
+        from app.services.auto_assign_service import try_auto_assign
+        await try_auto_assign(db, tenant_id, lead, first_message_text=message_text)
+    except Exception:
+        pass
     return lead
 
 
@@ -2208,3 +2314,305 @@ async def is_chat_muted(
         return True
 
     return False
+
+
+# ========== CRM v3: Auto Assign Rules ==========
+
+async def get_managers_for_tenant(db: AsyncSession, tenant_id: int, active_only: bool = True) -> List[int]:
+    """Список user_id с ролью manager (и member) в tenant для round_robin/least_loaded."""
+    q = (
+        select(TenantUser.user_id)
+        .where(TenantUser.tenant_id == tenant_id)
+        .where(TenantUser.role.in_(["manager", "member"]))
+    )
+    if active_only and hasattr(TenantUser, "is_active"):
+        q = q.where(TenantUser.is_active == True)
+    result = await db.execute(q)
+    return [r[0] for r in result.all()]
+
+
+async def list_auto_assign_rules(db: AsyncSession, tenant_id: int, active_only: bool = False) -> List[AutoAssignRule]:
+    """Правила автоназначения по tenant, сортировка по priority ASC."""
+    q = select(AutoAssignRule).where(AutoAssignRule.tenant_id == tenant_id)
+    if active_only:
+        q = q.where(AutoAssignRule.is_active == True)
+    q = q.order_by(AutoAssignRule.priority.asc(), AutoAssignRule.id.asc())
+    result = await db.execute(q)
+    return list(result.scalars().all())
+
+
+async def get_auto_assign_rule_by_id(db: AsyncSession, rule_id: int, tenant_id: int) -> Optional[AutoAssignRule]:
+    result = await db.execute(
+        select(AutoAssignRule).where(AutoAssignRule.id == rule_id).where(AutoAssignRule.tenant_id == tenant_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def create_auto_assign_rule(
+    db: AsyncSession,
+    tenant_id: int,
+    name: str,
+    is_active: bool = True,
+    priority: int = 0,
+    match_city: Optional[str] = None,
+    match_language: Optional[str] = None,
+    match_object_type: Optional[str] = None,
+    match_contains: Optional[str] = None,
+    time_from: Optional[int] = None,
+    time_to: Optional[int] = None,
+    days_of_week: Optional[str] = None,
+    strategy: str = "round_robin",
+    fixed_user_id: Optional[int] = None,
+    rr_state: int = 0,
+) -> AutoAssignRule:
+    rule = AutoAssignRule(
+        tenant_id=tenant_id,
+        name=name,
+        is_active=is_active,
+        priority=priority,
+        match_city=match_city,
+        match_language=match_language,
+        match_object_type=match_object_type,
+        match_contains=match_contains,
+        time_from=time_from,
+        time_to=time_to,
+        days_of_week=days_of_week,
+        strategy=strategy,
+        fixed_user_id=fixed_user_id,
+        rr_state=rr_state,
+    )
+    db.add(rule)
+    await db.commit()
+    await db.refresh(rule)
+    return rule
+
+
+async def update_auto_assign_rule(
+    db: AsyncSession,
+    rule_id: int,
+    tenant_id: int,
+    **kwargs,
+) -> Optional[AutoAssignRule]:
+    rule = await get_auto_assign_rule_by_id(db, rule_id, tenant_id)
+    if not rule:
+        return None
+    for k, v in kwargs.items():
+        if hasattr(rule, k):
+            setattr(rule, k, v)
+    await db.commit()
+    await db.refresh(rule)
+    return rule
+
+
+async def delete_auto_assign_rule(db: AsyncSession, rule_id: int, tenant_id: int) -> bool:
+    rule = await get_auto_assign_rule_by_id(db, rule_id, tenant_id)
+    if not rule:
+        return False
+    await db.delete(rule)
+    await db.commit()
+    return True
+
+
+async def count_active_leads_by_user(
+    db: AsyncSession,
+    tenant_id: int,
+    days: int = 7,
+) -> dict:
+    """Количество активных лидов (NEW/IN_PROGRESS) по assigned_user_id за последние days дней. Для least_loaded."""
+    since = datetime.utcnow() - timedelta(days=days)
+    result = await db.execute(
+        select(Lead.assigned_user_id, func.count(Lead.id))
+        .where(Lead.tenant_id == tenant_id)
+        .where(Lead.status.in_([LeadStatus.NEW, LeadStatus.IN_PROGRESS]))
+        .where(Lead.created_at >= since)
+        .where(Lead.assigned_user_id.isnot(None))
+        .group_by(Lead.assigned_user_id)
+    )
+    return {r[0]: r[1] for r in result.all()}
+
+
+async def lead_exists_by_external(db: AsyncSession, tenant_id: int, external_source: str, external_id: str) -> bool:
+    """Есть ли уже лид с таким external_source+external_id в tenant (дедупликация импорта)."""
+    result = await db.execute(
+        select(Lead.id)
+        .where(Lead.tenant_id == tenant_id)
+        .where(Lead.external_source == external_source)
+        .where(Lead.external_id == str(external_id).strip())
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
+async def lead_exists_by_phone_recent(db: AsyncSession, tenant_id: int, phone_normalized: str, days: int = 7) -> bool:
+    """Есть ли лид с таким телефоном в tenant за последние days дней (мягкая дедупликация)."""
+    since = datetime.utcnow() - timedelta(days=days)
+    result = await db.execute(
+        select(Lead.id)
+        .where(Lead.tenant_id == tenant_id)
+        .where(Lead.phone == phone_normalized)
+        .where(Lead.created_at >= since)
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
+# ========== CRM v3: Reports ==========
+
+async def report_summary(
+    db: AsyncSession,
+    tenant_id: int,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+) -> dict:
+    """Сводка для tenant: total_leads, new, in_progress, done, cancelled, avg_time_to_assign, avg_time_to_first_response, conversion_rate_done, managers[]."""
+    q = select(Lead).where(Lead.tenant_id == tenant_id)
+    if date_from:
+        q = q.where(Lead.created_at >= date_from)
+    if date_to:
+        q = q.where(Lead.created_at <= date_to)
+    result = await db.execute(q)
+    leads = list(result.scalars().all())
+    total = len(leads)
+    new_c = sum(1 for l in leads if l.status == LeadStatus.NEW)
+    in_progress_c = sum(1 for l in leads if l.status == LeadStatus.IN_PROGRESS)
+    done_c = sum(1 for l in leads if l.status == LeadStatus.DONE)
+    cancelled_c = sum(1 for l in leads if l.status == LeadStatus.CANCELLED)
+
+    assign_times = []
+    response_times = []
+    for l in leads:
+        if getattr(l, "assigned_at", None) and l.created_at:
+            assign_times.append((l.assigned_at - l.created_at).total_seconds())
+        if getattr(l, "first_response_at", None) and l.created_at:
+            response_times.append((l.first_response_at - l.created_at).total_seconds())
+
+    avg_assign = (sum(assign_times) / len(assign_times)) if assign_times else 0
+    avg_response = (sum(response_times) / len(response_times)) if response_times else 0
+    conversion = (done_c / total) if total else 0
+
+    manager_ids = await get_managers_for_tenant(db, tenant_id)
+    managers_list = []
+    for uid in manager_ids:
+        assigned_count = sum(1 for l in leads if getattr(l, "assigned_user_id", None) == uid)
+        done_count = sum(1 for l in leads if getattr(l, "assigned_user_id", None) == uid and l.status == LeadStatus.DONE)
+        new_count = sum(1 for l in leads if getattr(l, "assigned_user_id", None) == uid and l.status == LeadStatus.NEW)
+        resp_times = [
+            (l.first_response_at - l.created_at).total_seconds()
+            for l in leads
+            if getattr(l, "assigned_user_id", None) == uid and getattr(l, "first_response_at", None) and l.created_at
+        ]
+        avg_resp = (sum(resp_times) / len(resp_times)) if resp_times else 0
+        active_load = sum(
+            1 for l in leads
+            if getattr(l, "assigned_user_id", None) == uid and l.status in (LeadStatus.NEW, LeadStatus.IN_PROGRESS)
+        )
+        user = await get_user_by_id(db, uid)
+        managers_list.append({
+            "user_id": uid,
+            "email": user.email if user else None,
+            "leads_assigned_count": assigned_count,
+            "leads_done_count": done_count,
+            "leads_new_count": new_count,
+            "avg_response_time_sec": round(avg_resp, 1),
+            "active_load": active_load,
+        })
+
+    return {
+        "total_leads": total,
+        "new_leads": new_c,
+        "in_progress": in_progress_c,
+        "done": done_c,
+        "cancelled": cancelled_c,
+        "avg_time_to_assign_sec": round(avg_assign, 1),
+        "avg_time_to_first_response_sec": round(avg_response, 1),
+        "conversion_rate_done": round(conversion, 4),
+        "managers": managers_list,
+    }
+
+
+async def report_workload(
+    db: AsyncSession,
+    tenant_id: int,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+) -> list:
+    """Таблица по менеджерам: assigned, unassigned (лидов без назначения), active, done, cancelled."""
+    q = select(Lead).where(Lead.tenant_id == tenant_id)
+    if date_from:
+        q = q.where(Lead.created_at >= date_from)
+    if date_to:
+        q = q.where(Lead.created_at <= date_to)
+    result = await db.execute(q)
+    leads = list(result.scalars().all())
+    manager_ids = await get_managers_for_tenant(db, tenant_id)
+    unassigned = sum(1 for l in leads if not getattr(l, "assigned_user_id", None))
+    out = []
+    out.append({
+        "manager_user_id": None,
+        "manager_email": "(unassigned)",
+        "assigned": 0,
+        "unassigned": unassigned,
+        "active": 0,
+        "done": 0,
+        "cancelled": 0,
+    })
+    for uid in manager_ids:
+        assigned = sum(1 for l in leads if getattr(l, "assigned_user_id", None) == uid)
+        active = sum(1 for l in leads if getattr(l, "assigned_user_id", None) == uid and l.status in (LeadStatus.NEW, LeadStatus.IN_PROGRESS))
+        done = sum(1 for l in leads if getattr(l, "assigned_user_id", None) == uid and l.status == LeadStatus.DONE)
+        cancelled = sum(1 for l in leads if getattr(l, "assigned_user_id", None) == uid and l.status == LeadStatus.CANCELLED)
+        user = await get_user_by_id(db, uid)
+        out.append({
+            "manager_user_id": uid,
+            "manager_email": user.email if user else None,
+            "assigned": assigned,
+            "unassigned": 0,
+            "active": active,
+            "done": done,
+            "cancelled": cancelled,
+        })
+    return out
+
+
+async def report_sla(
+    db: AsyncSession,
+    tenant_id: int,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+) -> dict:
+    """SLA: распределение time_to_first_response (under_5m, under_15m, under_1h, over_1h) и список проблемных лидов."""
+    q = select(Lead).where(Lead.tenant_id == tenant_id).where(Lead.first_response_at.isnot(None))
+    if date_from:
+        q = q.where(Lead.created_at >= date_from)
+    if date_to:
+        q = q.where(Lead.created_at <= date_to)
+    result = await db.execute(q)
+    leads = list(result.scalars().all())
+    under_5m = under_15m = under_1h = over_1h = 0
+    problem = []
+    for l in leads:
+        if not getattr(l, "first_response_at", None) or not l.created_at:
+            continue
+        sec = (l.first_response_at - l.created_at).total_seconds()
+        if sec < 300:
+            under_5m += 1
+        elif sec < 900:
+            under_15m += 1
+        elif sec < 3600:
+            under_1h += 1
+        else:
+            over_1h += 1
+            problem.append({
+                "lead_id": l.id,
+                "created_at": l.created_at.isoformat() if l.created_at else None,
+                "assigned_at": l.assigned_at.isoformat() if getattr(l, "assigned_at", None) else None,
+                "first_response_at": l.first_response_at.isoformat() if l.first_response_at else None,
+                "assigned_to_user_id": getattr(l, "assigned_user_id", None),
+            })
+    return {
+        "under_5m": under_5m,
+        "under_15m": under_15m,
+        "under_1h": under_1h,
+        "over_1h": over_1h,
+        "problem_leads": problem[:50],
+    }

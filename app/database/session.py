@@ -471,6 +471,67 @@ async def init_db():
                 print("[OK] Tablicy ai_chat_mutes, audit_log, notifications provereny")
             except Exception as e:
                 print(f"[WARN] CRM v2.5 tables: {type(e).__name__}: {e}")
+            # CRM v3: leads — first_response_at, first_assigned_at, source, external_source, external_id
+            try:
+                for col, defn in [
+                    ("first_response_at", "TIMESTAMP"),
+                    ("first_assigned_at", "TIMESTAMP"),
+                    ("source", "VARCHAR(64)"),
+                    ("external_source", "VARCHAR(64)"),
+                    ("external_id", "VARCHAR(255)"),
+                ]:
+                    await conn.execute(text(f"ALTER TABLE leads ADD COLUMN IF NOT EXISTS {col} {defn}"))
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_leads_external_id ON leads(external_id) WHERE external_id IS NOT NULL"
+                ))
+                print("[OK] CRM v3 kolonki leads (first_response_at, source, external_*) provereny")
+            except Exception as e:
+                print(f"[WARN] CRM v3 leads columns: {type(e).__name__}: {e}")
+            # CRM v3: lead_events
+            try:
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS lead_events (
+                        id SERIAL PRIMARY KEY,
+                        tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                        lead_id INTEGER NOT NULL REFERENCES leads(id),
+                        type VARCHAR(64) NOT NULL,
+                        actor_user_id INTEGER REFERENCES users(id),
+                        payload JSONB,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lead_events_tenant_created ON lead_events(tenant_id, created_at)"))
+                await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lead_events_lead_id ON lead_events(lead_id)"))
+                print("[OK] Tablica lead_events proverena/sozdana")
+            except Exception as e:
+                print(f"[WARN] lead_events create: {type(e).__name__}: {e}")
+            # CRM v3: auto_assign_rules
+            try:
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS auto_assign_rules (
+                        id SERIAL PRIMARY KEY,
+                        tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                        name VARCHAR(255) NOT NULL,
+                        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                        priority INTEGER NOT NULL DEFAULT 0,
+                        match_city VARCHAR(255),
+                        match_language VARCHAR(32),
+                        match_object_type VARCHAR(255),
+                        match_contains VARCHAR(512),
+                        time_from INTEGER,
+                        time_to INTEGER,
+                        days_of_week VARCHAR(32),
+                        strategy VARCHAR(32) NOT NULL,
+                        fixed_user_id INTEGER REFERENCES users(id),
+                        rr_state INTEGER NOT NULL DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_auto_assign_rules_tenant_active ON auto_assign_rules(tenant_id, is_active)"))
+                print("[OK] Tablica auto_assign_rules proverena/sozdana")
+            except Exception as e:
+                print(f"[WARN] auto_assign_rules create: {type(e).__name__}: {e}")
     if "sqlite" in db_url:
         try:
             await conn.execute(text(
@@ -482,7 +543,7 @@ async def init_db():
                 print("[OK] SQLite: leads.lead_number uzhe est")
             else:
                 print(f"[WARN] leads.lead_number SQLite: {type(e).__name__}: {e}")
-        for col, typ in [("assigned_user_id", "INTEGER"), ("assigned_at", "DATETIME"), ("next_call_at", "DATETIME"), ("last_contact_at", "DATETIME"), ("pipeline_id", "INTEGER"), ("stage_id", "INTEGER"), ("moved_to_stage_at", "DATETIME")]:
+        for col, typ in [("assigned_user_id", "INTEGER"), ("assigned_at", "DATETIME"), ("next_call_at", "DATETIME"), ("last_contact_at", "DATETIME"), ("pipeline_id", "INTEGER"), ("stage_id", "INTEGER"), ("moved_to_stage_at", "DATETIME"), ("first_response_at", "DATETIME"), ("first_assigned_at", "DATETIME"), ("source", "VARCHAR(64)"), ("external_source", "VARCHAR(64)"), ("external_id", "VARCHAR(255)")]:
             try:
                 await conn.execute(text(f"ALTER TABLE leads ADD COLUMN {col} {typ}"))
                 print(f"[OK] SQLite: leads.{col} dobavlena")
@@ -491,6 +552,46 @@ async def init_db():
                     print(f"[OK] SQLite: leads.{col} uzhe est")
                 else:
                     print(f"[WARN] leads.{col} SQLite: {type(e).__name__}: {e}")
+        # SQLite: lead_events, auto_assign_rules (create_all may have created; raw CREATE IF NOT EXISTS for portability)
+        for tname, sql in [
+            ("lead_events", """
+                CREATE TABLE IF NOT EXISTS lead_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                    lead_id INTEGER NOT NULL REFERENCES leads(id),
+                    type VARCHAR(64) NOT NULL,
+                    actor_user_id INTEGER REFERENCES users(id),
+                    payload TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """),
+            ("auto_assign_rules", """
+                CREATE TABLE IF NOT EXISTS auto_assign_rules (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                    name VARCHAR(255) NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    priority INTEGER NOT NULL DEFAULT 0,
+                    match_city VARCHAR(255),
+                    match_language VARCHAR(32),
+                    match_object_type VARCHAR(255),
+                    match_contains VARCHAR(512),
+                    time_from INTEGER,
+                    time_to INTEGER,
+                    days_of_week VARCHAR(32),
+                    strategy VARCHAR(32) NOT NULL,
+                    fixed_user_id INTEGER REFERENCES users(id),
+                    rr_state INTEGER NOT NULL DEFAULT 0,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """),
+        ]:
+            try:
+                await conn.execute(text(sql))
+                print(f"[OK] SQLite: tablica {tname} proverena/sozdana")
+            except Exception as e:
+                print(f"[WARN] SQLite {tname}: {type(e).__name__}: {e}")
     print("[OK] Baza dannyh initializirovana")
 
 

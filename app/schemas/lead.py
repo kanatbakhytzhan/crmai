@@ -69,6 +69,11 @@ class LeadResponse(BaseModel):
     pipeline_id: Optional[int] = None
     stage_id: Optional[int] = None
     moved_to_stage_at: Optional[datetime] = None
+    first_response_at: Optional[datetime] = None
+    first_assigned_at: Optional[datetime] = None
+    source: Optional[str] = None
+    external_source: Optional[str] = None
+    external_id: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -82,13 +87,25 @@ class LeadResponse(BaseModel):
 
 
 class LeadCommentCreate(BaseModel):
-    """Создание комментария к лиду"""
-    text: str = Field(..., min_length=1)
+    """Создание комментария к лиду. POST /api/leads/{lead_id}/comments."""
+    text: str = Field(..., min_length=1, description="Текст комментария")
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [{"text": "Клиент перезвонил, договорились на замер в среду."}]
+        }
+    }
 
 
 class AIMuteUpdate(BaseModel):
     """POST /api/leads/{lead_id}/ai-mute — включить/выключить AI в чате лида."""
     muted: bool = Field(..., description="true = отключить AI в этом чате, false = включить")
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [{"muted": True}, {"muted": False}]
+        }
+    }
 
 
 class AIChatMuteBody(BaseModel):
@@ -96,9 +113,15 @@ class AIChatMuteBody(BaseModel):
     chat_key: str = Field(..., min_length=1, description="Уникальный ключ чата: remoteJid или phone:...")
     muted: bool = Field(..., description="true = отключить AI, false = включить")
 
+    model_config = {
+        "json_schema_extra": {
+            "examples": [{"chat_key": "77001234567@s.whatsapp.net", "muted": True}]
+        }
+    }
+
 
 class LeadAssignBody(BaseModel):
-    """PATCH /api/leads/{id}/assign. Тело: assigned_to_user_id (или assigned_user_id)."""
+    """PATCH /api/leads/{id}/assign. Назначить лид на менеджера (owner/rop)."""
     assigned_to_user_id: Optional[int] = None
     assigned_user_id: Optional[int] = None  # legacy alias
     status: Optional[str] = None
@@ -106,9 +129,15 @@ class LeadAssignBody(BaseModel):
     def get_assigned_user_id(self) -> Optional[int]:
         return self.assigned_to_user_id if self.assigned_to_user_id is not None else self.assigned_user_id
 
+    model_config = {
+        "json_schema_extra": {
+            "examples": [{"assigned_to_user_id": 5}, {"assigned_to_user_id": None, "status": "in_progress"}]
+        }
+    }
+
 
 class LeadBulkAssignBody(BaseModel):
-    """POST /api/leads/assign/bulk. Тело: lead_ids, assigned_to_user_id (или assigned_user_id)."""
+    """POST /api/leads/assign/bulk. Массовое назначение лидов на одного менеджера (owner/rop)."""
     lead_ids: list[int]
     assigned_to_user_id: Optional[int] = None
     assigned_user_id: Optional[int] = None  # legacy alias
@@ -116,6 +145,12 @@ class LeadBulkAssignBody(BaseModel):
 
     def get_assigned_user_id(self) -> Optional[int]:
         return self.assigned_to_user_id if self.assigned_to_user_id is not None else self.assigned_user_id
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [{"lead_ids": [1, 2, 3], "assigned_to_user_id": 5, "set_status": "in_progress"}]
+        }
+    }
 
 
 class LeadPatchBody(BaseModel):
@@ -175,3 +210,45 @@ class LeadCommentResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# ========== CRM v3: Import ==========
+
+class ImportLeadsResponse(BaseModel):
+    """Ответ POST /api/admin/import/leads."""
+    ok: bool
+    mode: str  # dry_run | commit
+    total_rows: int = 0
+    created: int = 0
+    skipped: int = 0
+    errors: list[str] = []
+    preview: list[dict] = []  # первые 20 для dry_run
+
+
+# ========== CRM v3: Assign by range ==========
+
+class AssignByRangeBody(BaseModel):
+    """POST /api/admin/leads/assign/by-range."""
+    tenant_id: int
+    from_index: int = Field(..., ge=1, description="Начальный индекс (1-based)")
+    to_index: int = Field(..., ge=1, description="Конечный индекс (1-based)")
+    strategy: str = "round_robin"  # round_robin | fixed_user | custom_map
+    fixed_user_id: Optional[int] = None
+    custom_map: Optional[list[dict]] = None  # [{"user_id": 10, "count": 5}, ...]
+    filters: Optional[dict] = None  # {"status": "new", "only_unassigned": true}
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {"tenant_id": 2, "from_index": 5, "to_index": 12, "strategy": "round_robin", "filters": {"status": "new", "only_unassigned": True}},
+            ]
+        }
+    }
+
+
+class AssignByRangeResponse(BaseModel):
+    ok: bool
+    total_selected: int = 0
+    assigned: int = 0
+    skipped: int = 0
+    details: list[dict] = []

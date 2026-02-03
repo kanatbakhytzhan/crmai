@@ -16,14 +16,14 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.database.session import init_db, drop_all_tables, engine, sync_engine, Base
-from app.api.endpoints import chat, auth, admin_users, admin_tenants, admin_diagnostics, admin_recovery, whatsapp_webhook, chatflow_webhook, me, leads_v2, pipelines, tasks, events, notifications
+from app.api.endpoints import chat, auth, admin_users, admin_tenants, admin_diagnostics, admin_recovery, whatsapp_webhook, chatflow_webhook, me, leads_v2, pipelines, tasks, events, notifications, admin_import, admin_reports, admin_auto_assign
 from app.services.telegram_service import stop_bot
 from app.admin import setup_admin
 
 # ВАЖНО: Импортируем модели, чтобы SQLAlchemy их зарегистрировал в Base.metadata
 # Без этого импорта таблицы не будут созданы!
 from app.database.models import (
-    User, BotUser, Message, Lead, LeadComment, Tenant, TenantUser, WhatsAppAccount,
+    User, BotUser, Message, Lead, LeadComment, LeadEvent, AutoAssignRule, Tenant, TenantUser, WhatsAppAccount,
     Conversation, ConversationMessage, ChatMute, ChatAIState,
     Pipeline, PipelineStage, LeadTask,
     AIChatMute, AuditLog, Notification,
@@ -90,8 +90,8 @@ async def lifespan(app: FastAPI):
 
 # Создание приложения FastAPI (redirect_slashes=False so POST /api/auth/login is not redirected to GET)
 app = FastAPI(
-    title="AI Sales Manager SaaS API",
-    description="Многопользовательская платформа ИИ-менеджеров по продажам",
+    title="BuildCRM API",
+    description="Многопользовательская платформа ИИ-менеджеров по продажам. Документация и тесты: /docs. QA-панель: /api/admin/diagnostics/ui (только admin).",
     version="2.0.0",
     lifespan=lifespan,
     redirect_slashes=False,
@@ -157,14 +157,17 @@ async def login_alias(
 # Подключение статических файлов
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
-# Подключение роутеров
-app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
-app.include_router(chat.router, prefix="/api", tags=["Chat"])
+# Роутеры. Теги для Swagger заданы в роутерах/эндпоинтах.
+app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
+app.include_router(chat.router, prefix="/api", tags=["Leads"])
 app.include_router(me.router, prefix="/api/me", tags=["Me"])
-app.include_router(admin_users.router, prefix="/api/admin", tags=["Admin Users"])
-app.include_router(admin_tenants.router, prefix="/api/admin", tags=["Admin Tenants"])
+app.include_router(admin_users.router, prefix="/api/admin", tags=["Users Admin"])
+app.include_router(admin_tenants.router, prefix="/api/admin", tags=["Tenants Admin"])
 app.include_router(admin_diagnostics.router, prefix="/api/admin", tags=["Admin Diagnostics"])
-app.include_router(admin_recovery.router, prefix="/api/admin")
+app.include_router(admin_recovery.router, prefix="/api/admin", tags=["Admin Recovery"])
+app.include_router(admin_import.router, prefix="/api/admin", tags=["Import"])
+app.include_router(admin_reports.router, prefix="/api/admin", tags=["Reports"])
+app.include_router(admin_auto_assign.router, prefix="/api/admin", tags=["Auto Assign"])
 app.include_router(whatsapp_webhook.router, prefix="/api/whatsapp", tags=["WhatsApp Webhook"])
 app.include_router(chatflow_webhook.router, prefix="/api/chatflow", tags=["ChatFlow Webhook"])
 app.include_router(leads_v2.router, prefix="/api/v2", tags=["CRM v2"])
@@ -175,6 +178,21 @@ app.include_router(notifications.router, prefix="/api", tags=["Notifications"])
 
 # Подключение админ-панели (используем СИНХРОННЫЙ engine!)
 setup_admin(app, sync_engine)
+
+
+# Кастомный Swagger UI: токен не слетает, список компактный
+from fastapi.openapi.docs import get_swagger_ui_html
+@app.get("/docs", include_in_schema=False)
+async def custom_swagger_ui_html():
+    return get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title=f"{app.title} — Swagger UI",
+        swagger_ui_parameters={
+            "docExpansion": "none",
+            "defaultModelsExpandDepth": 1,
+            "persistAuthorization": True,
+        },
+    )
 
 
 @app.get("/", include_in_schema=False)

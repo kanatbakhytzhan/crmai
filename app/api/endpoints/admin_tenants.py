@@ -2,7 +2,7 @@
 API эндпоинты админки: tenants и whatsapp_accounts (multi-tenant).
 Доступ только для админа (как /api/admin/users).
 """
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, get_current_admin, get_current_user

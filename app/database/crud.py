@@ -1,7 +1,7 @@
 """
 CRUD операции для работы с базой данных (Async)
 """
-from sqlalchemy import select, func
+from sqlalchemy import select, func, and_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
@@ -185,9 +185,65 @@ async def get_bot_user_messages(db: AsyncSession, bot_user_id: int, limit: int =
 
 # ========== LEAD ==========
 
-async def get_next_lead_number(db: AsyncSession) -> int:
-    """Следующий порядковый номер лида (max(lead_number)+1). Глобально; при MULTITENANT в будущем можно по tenant."""
-    result = await db.execute(select(func.coalesce(func.max(Lead.lead_number), 0) + 1))
+async def backfill_lead_numbers(db: AsyncSession) -> int:
+    """
+    Проставить lead_number всем лидам, где lead_number IS NULL.
+    Группировка по tenant_id (если есть), иначе по owner_id. Внутри группы — по created_at ASC (1, 2, 3, ...).
+    Учитывает уже существующие номера в группе (max+1, max+2, ...).
+    Возвращает количество обновлённых лидов.
+    """
+    result = await db.execute(
+        select(Lead).where(Lead.lead_number.is_(None)).order_by(Lead.created_at.asc())
+    )
+    null_leads = list(result.scalars().all())
+    if not null_leads:
+        return 0
+    # Группа: (tenant_id,) если tenant есть, иначе (None, owner_id)
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for lead in null_leads:
+        key = (lead.tenant_id,) if lead.tenant_id is not None else (None, lead.owner_id)
+        groups[key].append(lead)
+    updated = 0
+    for key, group_leads in groups.items():
+        # Существующий max в этой группе (лиды с уже проставленным lead_number)
+        if key[0] is not None:
+            tenant_id = key[0]
+            max_q = select(func.coalesce(func.max(Lead.lead_number), 0)).where(Lead.tenant_id == tenant_id)
+        else:
+            owner_id = key[1]
+            max_q = select(func.coalesce(func.max(Lead.lead_number), 0)).where(
+                and_(Lead.owner_id == owner_id, Lead.tenant_id.is_(None))
+            )
+        res = await db.execute(max_q)
+        start = (res.scalar_one() or 0) + 1
+        for i, lead in enumerate(group_leads):
+            lead.lead_number = start + i
+            updated += 1
+    if updated:
+        await db.commit()
+        for lead in null_leads:
+            await db.refresh(lead)
+    return updated
+
+
+async def get_next_lead_number(
+    db: AsyncSession,
+    *,
+    tenant_id: Optional[int] = None,
+    owner_id: int,
+) -> int:
+    """
+    Следующий порядковый номер лида в рамках tenant (или owner): max(lead_number)+1.
+    Уникальность: по tenant_id если задан, иначе по owner_id (tenant_id IS NULL).
+    """
+    if tenant_id is not None:
+        q = select(func.coalesce(func.max(Lead.lead_number), 0) + 1).where(Lead.tenant_id == tenant_id)
+    else:
+        q = select(func.coalesce(func.max(Lead.lead_number), 0) + 1).where(
+            and_(Lead.owner_id == owner_id, Lead.tenant_id.is_(None))
+        )
+    result = await db.execute(q)
     return result.scalar_one() or 1
 
 
@@ -203,9 +259,11 @@ async def create_lead(
     object_type: str = "",
     area: str = "",
     tenant_id: Optional[int] = None,
+    lead_number: Optional[int] = None,
 ) -> Lead:
-    """Создать новую заявку (лид). tenant_id опционален (multi-tenant). lead_number выставляется автоматически (max+1)."""
-    next_num = await get_next_lead_number(db)
+    """Создать новую заявку (лид). tenant_id опционален. lead_number — автоматически (max+1 в рамках tenant/owner), если не передан."""
+    if lead_number is None:
+        lead_number = await get_next_lead_number(db, tenant_id=tenant_id, owner_id=owner_id)
     lead = Lead(
         owner_id=owner_id,
         bot_user_id=bot_user_id,
@@ -218,7 +276,7 @@ async def create_lead(
         language=language,
         status=LeadStatus.NEW,
         tenant_id=tenant_id,
-        lead_number=next_num,
+        lead_number=lead_number,
     )
     db.add(lead)
     await db.commit()
@@ -1019,7 +1077,7 @@ async def create_lead_from_whatsapp(
         owner_id = first_user.id
     wa_user_id = f"wa_{from_wa_id}" if from_wa_id else "wa_unknown"
     bot_user = await get_or_create_bot_user(db, user_id=wa_user_id, owner_id=owner_id)
-    next_num = await get_next_lead_number(db)
+    next_num = await get_next_lead_number(db, tenant_id=tenant_id, owner_id=owner_id)
     lead = Lead(
         owner_id=owner_id,
         bot_user_id=bot_user.id,

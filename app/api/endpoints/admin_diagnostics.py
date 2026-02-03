@@ -196,3 +196,18 @@ async def diagnostics_fix_leads_tenant(
         "skipped_ids": skipped_ids,
         "notes": notes,
     }
+
+
+@router.post("/diagnostics/backfill-lead-numbers", response_model=dict)
+async def diagnostics_backfill_lead_numbers(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin),
+):
+    """
+    Проставить lead_number всем лидам, где lead_number IS NULL.
+    Группировка по tenant_id (или owner_id при отсутствии tenant).
+    Нумерация по created_at ASC. Возвращает { ok: true, updated: N }.
+    Только для админов.
+    """
+    updated = await crud.backfill_lead_numbers(db)
+    return {"ok": True, "updated": updated}

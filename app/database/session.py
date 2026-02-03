@@ -318,7 +318,7 @@ async def init_db():
                 print("[OK] Kolonka leads.phone_from_message proverena/dobavlena")
             except Exception as e:
                 print(f"[WARN] leads.phone_from_message migration: {type(e).__name__}: {e}")
-            # leads.lead_number (CRM v2: порядковый номер лида)
+            # leads.lead_number (CRM v2: порядковый номер, уникален в рамках tenant или owner)
             try:
                 await conn.execute(text(
                     "ALTER TABLE leads ADD COLUMN IF NOT EXISTS lead_number INTEGER"
@@ -326,7 +326,13 @@ async def init_db():
                 await conn.execute(text(
                     "CREATE INDEX IF NOT EXISTS ix_leads_lead_number ON leads(lead_number) WHERE lead_number IS NOT NULL"
                 ))
-                print("[OK] Kolonka leads.lead_number proverena/dobavlena")
+                await conn.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_leads_tenant_lead_number ON leads(tenant_id, lead_number) WHERE tenant_id IS NOT NULL"
+                ))
+                await conn.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_leads_owner_lead_number ON leads(owner_id, lead_number) WHERE tenant_id IS NULL"
+                ))
+                print("[OK] Kolonka leads.lead_number i unikalnost provereny/dobavleny")
             except Exception as e:
                 print(f"[WARN] leads.lead_number migration: {type(e).__name__}: {e}")
     if "sqlite" in db_url:

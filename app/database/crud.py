@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 from app.database.models import (
     User, BotUser, Message, Lead, LeadStatus, LeadComment, LeadEvent, AutoAssignRule,
-    Tenant, TenantUser, WhatsAppAccount,
+    Tenant, TenantUser, WhatsAppAccount, TenantIntegration, TenantPipelineMapping, TenantFieldMapping,
     Conversation, ConversationMessage, ChatMute, ChatAIState,
     Pipeline, PipelineStage, LeadTask,
     AIChatMute, AuditLog, Notification,
@@ -1266,8 +1266,11 @@ async def update_tenant(
     ai_enabled: Optional[bool] = None,
     ai_prompt: Optional[str] = None,
     webhook_key: Optional[str] = None,
+    whatsapp_source: Optional[str] = None,
+    ai_enabled_global: Optional[bool] = None,
+    ai_after_lead_submitted_behavior: Optional[str] = None,
 ) -> Optional[Tenant]:
-    """Обновить tenant."""
+    """Обновить tenant. Включает Universal Admin Console поля."""
     tenant = await get_tenant_by_id(db, tenant_id)
     if not tenant:
         return None
@@ -1285,6 +1288,12 @@ async def update_tenant(
         tenant.ai_prompt = ai_prompt
     if webhook_key is not None:
         tenant.webhook_key = (webhook_key or "").strip() or None
+    if whatsapp_source is not None:
+        tenant.whatsapp_source = whatsapp_source
+    if ai_enabled_global is not None:
+        tenant.ai_enabled_global = ai_enabled_global
+    if ai_after_lead_submitted_behavior is not None:
+        tenant.ai_after_lead_submitted_behavior = ai_after_lead_submitted_behavior
     await db.commit()
     await db.refresh(tenant)
     return tenant
@@ -2616,3 +2625,287 @@ async def report_sla(
         "over_1h": over_1h,
         "problem_leads": problem[:50],
     }
+
+
+# ========== UNIVERSAL ADMIN: Tenant Integrations ==========
+
+async def get_tenant_integration(db: AsyncSession, tenant_id: int, provider: str) -> Optional[TenantIntegration]:
+    """Получить интеграцию tenant с провайдером."""
+    result = await db.execute(
+        select(TenantIntegration)
+        .where(TenantIntegration.tenant_id == tenant_id)
+        .where(TenantIntegration.provider == provider)
+    )
+    return result.scalar_one_or_none()
+
+
+async def upsert_tenant_integration(
+    db: AsyncSession,
+    tenant_id: int,
+    provider: str,
+    *,
+    base_domain: Optional[str] = None,
+    access_token: Optional[str] = None,
+    refresh_token: Optional[str] = None,
+    token_expires_at: Optional[datetime] = None,
+    is_active: Optional[bool] = None,
+) -> TenantIntegration:
+    """Создать или обновить интеграцию."""
+    existing = await get_tenant_integration(db, tenant_id, provider)
+    if existing:
+        if base_domain is not None:
+            existing.base_domain = base_domain
+        if access_token is not None:
+            existing.access_token = access_token
+        if refresh_token is not None:
+            existing.refresh_token = refresh_token
+        if token_expires_at is not None:
+            existing.token_expires_at = token_expires_at
+        if is_active is not None:
+            existing.is_active = is_active
+        existing.updated_at = datetime.utcnow()
+        await db.commit()
+        await db.refresh(existing)
+        return existing
+    integ = TenantIntegration(
+        tenant_id=tenant_id,
+        provider=provider,
+        base_domain=base_domain,
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_expires_at=token_expires_at,
+        is_active=is_active if is_active is not None else True,
+    )
+    db.add(integ)
+    await db.commit()
+    await db.refresh(integ)
+    return integ
+
+
+async def update_tenant_integration_tokens(
+    db: AsyncSession,
+    tenant_id: int,
+    provider: str,
+    access_token: str,
+    refresh_token: str,
+    token_expires_at: datetime,
+) -> bool:
+    """Обновить токены интеграции (для авто-refresh)."""
+    existing = await get_tenant_integration(db, tenant_id, provider)
+    if not existing:
+        return False
+    existing.access_token = access_token
+    existing.refresh_token = refresh_token
+    existing.token_expires_at = token_expires_at
+    existing.updated_at = datetime.utcnow()
+    await db.commit()
+    return True
+
+
+async def deactivate_tenant_integration(db: AsyncSession, tenant_id: int, provider: str) -> bool:
+    """Деактивировать интеграцию."""
+    existing = await get_tenant_integration(db, tenant_id, provider)
+    if not existing:
+        return False
+    existing.is_active = False
+    existing.updated_at = datetime.utcnow()
+    await db.commit()
+    return True
+
+
+# ========== UNIVERSAL ADMIN: Pipeline Mappings ==========
+
+async def list_pipeline_mappings(db: AsyncSession, tenant_id: int, provider: str = "amocrm") -> List[TenantPipelineMapping]:
+    """Список маппингов stage_key -> stage_id."""
+    result = await db.execute(
+        select(TenantPipelineMapping)
+        .where(TenantPipelineMapping.tenant_id == tenant_id)
+        .where(TenantPipelineMapping.provider == provider)
+        .order_by(TenantPipelineMapping.stage_key.asc())
+    )
+    return list(result.scalars().all())
+
+
+async def upsert_pipeline_mapping(
+    db: AsyncSession,
+    tenant_id: int,
+    provider: str,
+    stage_key: str,
+    stage_id: Optional[str] = None,
+    pipeline_id: Optional[str] = None,
+    is_active: bool = True,
+) -> TenantPipelineMapping:
+    """Создать или обновить маппинг стадии."""
+    result = await db.execute(
+        select(TenantPipelineMapping)
+        .where(TenantPipelineMapping.tenant_id == tenant_id)
+        .where(TenantPipelineMapping.provider == provider)
+        .where(TenantPipelineMapping.stage_key == stage_key)
+    )
+    existing = result.scalar_one_or_none()
+    if existing:
+        existing.stage_id = stage_id
+        if pipeline_id is not None:
+            existing.pipeline_id = pipeline_id
+        existing.is_active = is_active
+        await db.commit()
+        await db.refresh(existing)
+        return existing
+    mapping = TenantPipelineMapping(
+        tenant_id=tenant_id,
+        provider=provider,
+        stage_key=stage_key,
+        stage_id=stage_id,
+        pipeline_id=pipeline_id,
+        is_active=is_active,
+    )
+    db.add(mapping)
+    await db.commit()
+    await db.refresh(mapping)
+    return mapping
+
+
+async def get_pipeline_mapping_by_stage_key(db: AsyncSession, tenant_id: int, provider: str, stage_key: str) -> Optional[TenantPipelineMapping]:
+    """Получить маппинг по stage_key."""
+    result = await db.execute(
+        select(TenantPipelineMapping)
+        .where(TenantPipelineMapping.tenant_id == tenant_id)
+        .where(TenantPipelineMapping.provider == provider)
+        .where(TenantPipelineMapping.stage_key == stage_key)
+        .where(TenantPipelineMapping.is_active == True)
+    )
+    return result.scalar_one_or_none()
+
+
+# ========== UNIVERSAL ADMIN: Field Mappings ==========
+
+async def list_field_mappings(db: AsyncSession, tenant_id: int, provider: str = "amocrm") -> List[TenantFieldMapping]:
+    """Список маппингов field_key -> amo_field_id."""
+    result = await db.execute(
+        select(TenantFieldMapping)
+        .where(TenantFieldMapping.tenant_id == tenant_id)
+        .where(TenantFieldMapping.provider == provider)
+        .order_by(TenantFieldMapping.field_key.asc())
+    )
+    return list(result.scalars().all())
+
+
+async def upsert_field_mapping(
+    db: AsyncSession,
+    tenant_id: int,
+    provider: str,
+    field_key: str,
+    entity_type: str,
+    amo_field_id: Optional[str] = None,
+    is_active: bool = True,
+) -> TenantFieldMapping:
+    """Создать или обновить маппинг поля."""
+    result = await db.execute(
+        select(TenantFieldMapping)
+        .where(TenantFieldMapping.tenant_id == tenant_id)
+        .where(TenantFieldMapping.provider == provider)
+        .where(TenantFieldMapping.field_key == field_key)
+        .where(TenantFieldMapping.entity_type == entity_type)
+    )
+    existing = result.scalar_one_or_none()
+    if existing:
+        existing.amo_field_id = amo_field_id
+        existing.is_active = is_active
+        await db.commit()
+        await db.refresh(existing)
+        return existing
+    mapping = TenantFieldMapping(
+        tenant_id=tenant_id,
+        provider=provider,
+        field_key=field_key,
+        entity_type=entity_type,
+        amo_field_id=amo_field_id,
+        is_active=is_active,
+    )
+    db.add(mapping)
+    await db.commit()
+    await db.refresh(mapping)
+    return mapping
+
+
+# ========== UNIVERSAL ADMIN: Lead Backfill tenant_id ==========
+
+async def backfill_lead_tenant_ids(db: AsyncSession) -> int:
+    """
+    Безопасный backfill: для лидов без tenant_id попробовать заполнить по conversation.tenant_id или tenant по default_owner_user_id.
+    Возвращает количество обновлённых лидов.
+    """
+    # Лиды без tenant_id
+    result = await db.execute(
+        select(Lead).where(Lead.tenant_id.is_(None))
+    )
+    leads_without_tenant = list(result.scalars().all())
+    updated = 0
+    for lead in leads_without_tenant:
+        # Попробовать найти tenant по owner_id
+        tenant_result = await db.execute(
+            select(Tenant).where(Tenant.default_owner_user_id == lead.owner_id).limit(1)
+        )
+        tenant = tenant_result.scalar_one_or_none()
+        if tenant:
+            lead.tenant_id = tenant.id
+            updated += 1
+    if updated:
+        await db.commit()
+    return updated
+
+
+async def get_conversation_for_bot_user(db: AsyncSession, bot_user_id: int) -> Optional[Conversation]:
+    """Последняя conversation по bot_user.user_id (remote_jid)."""
+    bot_user = await get_bot_user_by_id(db, bot_user_id)
+    if not bot_user:
+        return None
+    result = await db.execute(
+        select(Conversation)
+        .where(Conversation.external_id == bot_user.user_id)
+        .order_by(Conversation.updated_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def mute_chat_for_lead(
+    db: AsyncSession,
+    lead_id: int,
+    muted: bool,
+    muted_by_user_id: Optional[int] = None,
+) -> dict:
+    """
+    Mute/unmute чат для лида. Возвращает {"ok": True/False, "muted": bool, "error": str?}.
+    Ищем conversation по lead.bot_user_id. Если нет tenant_id — ошибка.
+    """
+    lead = await db.execute(select(Lead).where(Lead.id == lead_id))
+    lead = lead.scalar_one_or_none()
+    if not lead:
+        return {"ok": False, "error": "lead_not_found"}
+    if not lead.tenant_id:
+        return {"ok": False, "error": "lead_has_no_tenant_id"}
+    conv = await get_conversation_for_bot_user(db, lead.bot_user_id)
+    if not conv:
+        return {"ok": False, "error": "no_conversation"}
+    channel = conv.channel or "chatflow"
+    external_id = conv.external_id
+    # Upsert в chat_ai_states (главная таблица для /stop /start)
+    result = await db.execute(
+        select(ChatAIState)
+        .where(ChatAIState.tenant_id == lead.tenant_id)
+        .where(ChatAIState.remote_jid == external_id)
+    )
+    state = result.scalar_one_or_none()
+    if state:
+        state.is_enabled = not muted
+        state.updated_at = datetime.utcnow()
+    else:
+        state = ChatAIState(
+            tenant_id=lead.tenant_id,
+            remote_jid=external_id,
+            is_enabled=not muted,
+        )
+        db.add(state)
+    await db.commit()
+    return {"ok": True, "muted": muted, "channel": channel, "external_id": external_id}

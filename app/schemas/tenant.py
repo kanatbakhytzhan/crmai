@@ -18,6 +18,10 @@ class TenantUpdate(BaseModel):
     ai_enabled: Optional[bool] = None
     ai_prompt: Optional[str] = None
     webhook_key: Optional[str] = None  # UUID для POST /api/chatflow/webhook/{key}
+    # Universal Admin Console:
+    whatsapp_source: Optional[str] = None  # chatflow | amomarket
+    ai_enabled_global: Optional[bool] = None
+    ai_after_lead_submitted_behavior: Optional[str] = None
 
 
 class TenantResponse(BaseModel):
@@ -30,10 +34,116 @@ class TenantResponse(BaseModel):
     ai_prompt: Optional[str] = None
     webhook_key: Optional[str] = None
     webhook_url: Optional[str] = None  # вычисляемое: BASE_URL + /api/chatflow/webhook?key= + webhook_key
+    whatsapp_source: str = "chatflow"
+    ai_enabled_global: bool = True
+    ai_after_lead_submitted_behavior: Optional[str] = "polite_close"
     created_at: datetime
 
     class Config:
         from_attributes = True
+
+
+# ========== Universal Admin Console: Tenant Settings ==========
+
+class TenantSettingsResponse(BaseModel):
+    """GET /api/admin/tenants/{id}/settings"""
+    whatsapp_source: str = "chatflow"
+    ai_enabled_global: bool = True
+    ai_prompt: Optional[str] = None
+    ai_after_lead_submitted_behavior: str = "polite_close"
+
+
+class TenantSettingsUpdate(BaseModel):
+    """PATCH /api/admin/tenants/{id}/settings"""
+    whatsapp_source: Optional[str] = None
+    ai_enabled_global: Optional[bool] = None
+    ai_prompt: Optional[str] = None
+    ai_after_lead_submitted_behavior: Optional[str] = None
+
+
+# ========== Universal Admin Console: AmoCRM ==========
+
+class AmoCRMAuthUrlResponse(BaseModel):
+    url: Optional[str] = None
+    error: Optional[str] = None
+
+
+class AmoCRMCallbackBody(BaseModel):
+    code: str
+    base_domain: str  # example.amocrm.ru
+
+
+class AmoCRMStatusResponse(BaseModel):
+    is_active: bool = False
+    base_domain: Optional[str] = None
+    token_expires_at: Optional[datetime] = None
+    connected: bool = False
+
+
+# ========== Universal Admin Console: Pipeline Mappings ==========
+
+class PipelineMappingItem(BaseModel):
+    stage_key: str
+    stage_id: Optional[str] = None
+    pipeline_id: Optional[str] = None
+    is_active: bool = True
+
+
+class PipelineMappingResponse(BaseModel):
+    id: int
+    tenant_id: int
+    provider: str
+    pipeline_id: Optional[str] = None
+    stage_key: str
+    stage_id: Optional[str] = None
+    is_active: bool
+
+    class Config:
+        from_attributes = True
+
+
+class PipelineMappingBulkUpdate(BaseModel):
+    mappings: list[PipelineMappingItem]
+
+
+# ========== Universal Admin Console: Field Mappings ==========
+
+class FieldMappingItem(BaseModel):
+    field_key: str
+    amo_field_id: Optional[str] = None
+    entity_type: str = "lead"  # lead | contact
+    is_active: bool = True
+
+
+class FieldMappingResponse(BaseModel):
+    id: int
+    tenant_id: int
+    provider: str
+    field_key: str
+    amo_field_id: Optional[str] = None
+    entity_type: str
+    is_active: bool
+
+    class Config:
+        from_attributes = True
+
+
+class FieldMappingBulkUpdate(BaseModel):
+    mappings: list[FieldMappingItem]
+
+
+# ========== Universal Admin Console: Mute from Lead ==========
+
+class LeadMuteBody(BaseModel):
+    muted: bool
+
+
+class LeadMuteResponse(BaseModel):
+    ok: bool
+    muted: Optional[bool] = None
+    error: Optional[str] = None
+    channel: Optional[str] = None
+    external_id: Optional[str] = None
 
 
 class AISettingsResponse(BaseModel):

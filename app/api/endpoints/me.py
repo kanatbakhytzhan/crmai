@@ -12,6 +12,22 @@ from app.schemas.tenant import MeAISettingsResponse, MeAISettingsUpdate
 router = APIRouter()
 
 
+@router.get("/role", response_model=dict)
+async def get_me_role(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Роль текущего пользователя в tenant: owner | rop | manager.
+    Возвращает tenant_id и role (если пользователь в tenant).
+    """
+    tenant = await crud.get_tenant_for_me(db, current_user.id)
+    if not tenant:
+        return {"tenant_id": None, "role": None}
+    role = await crud.get_tenant_user_role(db, tenant.id, current_user.id)
+    return {"tenant_id": tenant.id, "role": role or "manager"}
+
+
 @router.get("/ai-settings", response_model=MeAISettingsResponse)
 async def get_me_ai_settings(
     db: AsyncSession = Depends(get_db),

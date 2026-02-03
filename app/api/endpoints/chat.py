@@ -267,6 +267,8 @@ async def get_leads(
         last_c = await crud.get_last_lead_comment(db, l.id)
         item["last_comment"] = (last_c.text[:100] if last_c and last_c.text else None) if last_c else None
         aid = getattr(l, "assigned_user_id", None)
+        item["assigned_to_user_id"] = aid
+        item["assigned_at"] = getattr(l, "assigned_at", None)
         if aid:
             u = await crud.get_user_by_id(db, aid)
             if u:
@@ -294,6 +296,8 @@ async def get_lead(
         raise HTTPException(status_code=404, detail=f"Lead with ID {lead_id} not found")
     item = LeadResponse.model_validate(lead).model_dump()
     aid = getattr(lead, "assigned_user_id", None)
+    item["assigned_to_user_id"] = aid
+    item["assigned_at"] = getattr(lead, "assigned_at", None)
     if aid:
         u = await crud.get_user_by_id(db, aid)
         if u:
@@ -352,8 +356,8 @@ async def assign_lead(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Назначить лид (owner/rop). Manager — 403.
-    Body: { "assigned_user_id": 123 | null, "status": "in_progress" (опционально) }.
+    Назначить лид на менеджера (owner/rop). Manager — 403.
+    Body: { "assigned_to_user_id": 123 } или null чтобы снять назначение.
     """
     multitenant = (getattr(get_settings(), "multitenant_enabled", "false") or "false").upper() == "TRUE"
     lead = await crud.get_lead_by_id(db, lead_id, current_user.id, multitenant_include_tenant_leads=multitenant)
@@ -369,12 +373,37 @@ async def assign_lead(
         from app.database.models import LeadStatus
         status_map = {"new": LeadStatus.NEW, "in_progress": LeadStatus.IN_PROGRESS, "success": LeadStatus.DONE, "failed": LeadStatus.CANCELLED, "done": LeadStatus.DONE, "cancelled": LeadStatus.CANCELLED}
         status_enum = status_map.get((body.status or "").strip().lower())
+    assigned_id = body.get_assigned_user_id()
     updated = await crud.update_lead_assignment(
-        db, lead_id, current_user.id, body.assigned_user_id, status=status_enum, multitenant_include_tenant_leads=multitenant
+        db, lead_id, current_user.id, assigned_id, status=status_enum, multitenant_include_tenant_leads=multitenant
     )
     if not updated:
         raise HTTPException(status_code=400, detail="Assignment failed (user not in tenant or invalid)")
-    return {"ok": True, "lead": LeadResponse.model_validate(updated).model_dump()}
+    out = LeadResponse.model_validate(updated).model_dump()
+    out["assigned_to_user_id"] = getattr(updated, "assigned_user_id", None)
+    out["assigned_at"] = getattr(updated, "assigned_at", None)
+    return {"ok": True, "lead": out}
+
+
+@router.patch("/leads/{lead_id}/unassign", response_model=dict)
+async def unassign_lead(
+    lead_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Снять назначение с лида (assigned_to_user_id = null). Только owner/rop.
+    """
+    multitenant = (getattr(get_settings(), "multitenant_enabled", "false") or "false").upper() == "TRUE"
+    updated = await crud.update_lead_assignment(
+        db, lead_id, current_user.id, None, status=None, multitenant_include_tenant_leads=multitenant
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Lead not found or only owner/rop can unassign")
+    out = LeadResponse.model_validate(updated).model_dump()
+    out["assigned_to_user_id"] = None
+    out["assigned_at"] = None
+    return {"ok": True, "lead": out}
 
 
 @router.post("/leads/assign/bulk", response_model=dict)
@@ -384,8 +413,11 @@ async def bulk_assign_leads(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Массовое назначение. owner/rop. Возвращает assigned, skipped, skipped_ids.
+    Массовое назначение на менеджера. owner/rop. Body: lead_ids, assigned_to_user_id.
     """
+    assigned_user_id = body.get_assigned_user_id()
+    if assigned_user_id is None:
+        raise HTTPException(status_code=400, detail="assigned_to_user_id is required")
     multitenant = (getattr(get_settings(), "multitenant_enabled", "false") or "false").upper() == "TRUE"
     from app.database.models import LeadStatus
     status_map = {"new": LeadStatus.NEW, "in_progress": LeadStatus.IN_PROGRESS, "success": LeadStatus.DONE, "failed": LeadStatus.CANCELLED, "done": LeadStatus.DONE, "cancelled": LeadStatus.CANCELLED}
@@ -393,7 +425,7 @@ async def bulk_assign_leads(
     if body.set_status:
         set_status = status_map.get((body.set_status or "").strip().lower())
     assigned, skipped, skipped_ids = await crud.bulk_assign_leads(
-        db, body.lead_ids, body.assigned_user_id, current_user.id, set_status=set_status, multitenant_include_tenant_leads=multitenant
+        db, body.lead_ids, assigned_user_id, current_user.id, set_status=set_status, multitenant_include_tenant_leads=multitenant
     )
     return {"ok": True, "assigned": assigned, "skipped": skipped, "skipped_ids": skipped_ids}
 

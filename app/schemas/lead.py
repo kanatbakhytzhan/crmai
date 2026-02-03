@@ -60,6 +60,8 @@ class LeadResponse(BaseModel):
     lead_number: Optional[int] = None  # CRM v2: порядковый номер лида
     tenant_id: Optional[int] = None
     assigned_user_id: Optional[int] = None
+    assigned_to_user_id: Optional[int] = None  # alias для API (то же что assigned_user_id)
+    assigned_at: Optional[datetime] = None
     assigned_user_email: Optional[str] = None
     assigned_user_name: Optional[str] = None  # company_name
     next_call_at: Optional[datetime] = None
@@ -87,16 +89,24 @@ class AIMuteUpdate(BaseModel):
 
 
 class LeadAssignBody(BaseModel):
-    """PATCH /api/leads/{id}/assign"""
-    assigned_user_id: Optional[int] = None
-    status: Optional[str] = None  # "in_progress" и т.д.
+    """PATCH /api/leads/{id}/assign. Тело: assigned_to_user_id (или assigned_user_id)."""
+    assigned_to_user_id: Optional[int] = None
+    assigned_user_id: Optional[int] = None  # legacy alias
+    status: Optional[str] = None
+
+    def get_assigned_user_id(self) -> Optional[int]:
+        return self.assigned_to_user_id if self.assigned_to_user_id is not None else self.assigned_user_id
 
 
 class LeadBulkAssignBody(BaseModel):
-    """POST /api/leads/assign/bulk"""
+    """POST /api/leads/assign/bulk. Тело: lead_ids, assigned_to_user_id (или assigned_user_id)."""
     lead_ids: list[int]
-    assigned_user_id: int
+    assigned_to_user_id: Optional[int] = None
+    assigned_user_id: Optional[int] = None  # legacy alias
     set_status: Optional[str] = None
+
+    def get_assigned_user_id(self) -> Optional[int]:
+        return self.assigned_to_user_id if self.assigned_to_user_id is not None else self.assigned_user_id
 
 
 class LeadPatchBody(BaseModel):

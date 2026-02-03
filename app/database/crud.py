@@ -421,6 +421,9 @@ async def update_lead_assignment(
         target_in_tenant = await get_tenant_user(db, lead.tenant_id, assigned_user_id)
         if not target_in_tenant:
             return None
+        lead.assigned_at = datetime.utcnow()
+    else:
+        lead.assigned_at = None
     lead.assigned_user_id = assigned_user_id
     if status is not None:
         lead.status = status
@@ -458,6 +461,7 @@ async def bulk_assign_leads(
             skipped_ids.append(lid)
             continue
         lead.assigned_user_id = assigned_user_id
+        lead.assigned_at = datetime.utcnow()
         if set_status is not None:
             lead.status = set_status
         assigned += 1

@@ -352,7 +352,10 @@ async def init_db():
                 await conn.execute(text(
                     "CREATE INDEX IF NOT EXISTS idx_leads_assigned_user_id ON leads(assigned_user_id) WHERE assigned_user_id IS NOT NULL"
                 ))
-                print("[OK] Kolonki leads.assigned_user_id, next_call_at, last_contact_at provereny")
+                await conn.execute(text(
+                    "ALTER TABLE leads ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMP"
+                ))
+                print("[OK] Kolonki leads.assigned_user_id, assigned_at, next_call_at, last_contact_at provereny")
             except Exception as e:
                 print(f"[WARN] leads CRM v2 columns: {type(e).__name__}: {e}")
     if "sqlite" in db_url:
@@ -366,7 +369,7 @@ async def init_db():
                 print("[OK] SQLite: leads.lead_number uzhe est")
             else:
                 print(f"[WARN] leads.lead_number SQLite: {type(e).__name__}: {e}")
-        for col, typ in [("assigned_user_id", "INTEGER"), ("next_call_at", "DATETIME"), ("last_contact_at", "DATETIME")]:
+        for col, typ in [("assigned_user_id", "INTEGER"), ("assigned_at", "DATETIME"), ("next_call_at", "DATETIME"), ("last_contact_at", "DATETIME")]:
             try:
                 await conn.execute(text(f"ALTER TABLE leads ADD COLUMN {col} {typ}"))
                 print(f"[OK] SQLite: leads.{col} dobavlena")

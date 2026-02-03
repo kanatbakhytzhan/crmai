@@ -62,7 +62,7 @@ class MeAISettingsUpdate(BaseModel):
 class TenantUserAdd(BaseModel):
     """POST /api/admin/tenants/{id}/users — добавить пользователя по email."""
     email: str
-    role: str = "member"  # manager | admin | member
+    role: str = "member"  # owner | rop | manager (admin/member — legacy)
 
 
 class TenantUserResponse(BaseModel):

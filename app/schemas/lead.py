@@ -58,6 +58,12 @@ class LeadResponse(BaseModel):
     created_at: datetime
     last_comment: Optional[str] = None  # preview последнего комментария (до 100 символов)
     lead_number: Optional[int] = None  # CRM v2: порядковый номер лида
+    tenant_id: Optional[int] = None
+    assigned_user_id: Optional[int] = None
+    assigned_user_email: Optional[str] = None
+    assigned_user_name: Optional[str] = None  # company_name
+    next_call_at: Optional[datetime] = None
+    last_contact_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 
@@ -78,6 +84,27 @@ class LeadCommentCreate(BaseModel):
 class AIMuteUpdate(BaseModel):
     """POST /api/leads/{lead_id}/ai-mute — включить/выключить AI в чате лида."""
     muted: bool = Field(..., description="true = отключить AI в этом чате, false = включить")
+
+
+class LeadAssignBody(BaseModel):
+    """PATCH /api/leads/{id}/assign"""
+    assigned_user_id: Optional[int] = None
+    status: Optional[str] = None  # "in_progress" и т.д.
+
+
+class LeadBulkAssignBody(BaseModel):
+    """POST /api/leads/assign/bulk"""
+    lead_ids: list[int]
+    assigned_user_id: int
+    set_status: Optional[str] = None
+
+
+class LeadPatchBody(BaseModel):
+    """PATCH /api/leads/{id} — status, next_call_at, last_contact_at, assigned_user_id (owner/rop)."""
+    status: Optional[str] = None
+    next_call_at: Optional[datetime] = None
+    last_contact_at: Optional[datetime] = None
+    assigned_user_id: Optional[int] = None
 
 
 class LeadCommentResponse(BaseModel):

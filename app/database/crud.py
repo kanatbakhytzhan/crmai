@@ -323,6 +323,35 @@ async def get_user_leads(
     return list(result.scalars().all())
 
 
+async def get_leads_for_user_crm(
+    db: AsyncSession,
+    user_id: int,
+    limit: int = 1000,
+) -> List[Lead]:
+    """
+    Лиды для CRM с учётом ролей: owner/rop — все лиды tenant; manager — только где assigned_user_id = user_id.
+    Плюс лиды по owner_id (legacy).
+    """
+    candidates = await get_user_leads(
+        db, owner_id=user_id, limit=limit, multitenant_include_tenant_leads=True
+    )
+    filtered = []
+    for lead in candidates:
+        if lead.tenant_id is None:
+            filtered.append(lead)
+            continue
+        role = await get_tenant_user_role(db, lead.tenant_id, user_id)
+        if role in ("owner", "rop"):
+            filtered.append(lead)
+        elif role == "manager":
+            if getattr(lead, "assigned_user_id", None) == user_id:
+                filtered.append(lead)
+        else:
+            if lead.owner_id == user_id:
+                filtered.append(lead)
+    return filtered
+
+
 async def get_lead_by_id(
     db: AsyncSession,
     lead_id: int,
@@ -344,15 +373,11 @@ async def get_lead_by_id(
         tenant = await get_tenant_by_id(db, lead.tenant_id)
         if tenant and getattr(tenant, "default_owner_user_id", None) == owner_id:
             return lead
-        # Доступ по tenant_users (multi-user в одном tenant)
-        tu = await db.execute(
-            select(TenantUser).where(
-                TenantUser.tenant_id == lead.tenant_id,
-                TenantUser.user_id == owner_id,
-            )
-        )
-        if tu.scalar_one_or_none():
+        role = await get_tenant_user_role(db, lead.tenant_id, owner_id)
+        if role in ("owner", "rop"):
             return lead
+        if role == "manager":
+            return lead if getattr(lead, "assigned_user_id", None) == owner_id else None
     return None
 
 
@@ -370,6 +395,119 @@ async def update_lead_status(
         lead.status = status
         await db.commit()
         await db.refresh(lead)
+    return lead
+
+
+async def update_lead_assignment(
+    db: AsyncSession,
+    lead_id: int,
+    current_user_id: int,
+    assigned_user_id: Optional[int],
+    status: Optional[LeadStatus] = None,
+    *,
+    multitenant_include_tenant_leads: bool = False,
+) -> Optional[Lead]:
+    """
+    Назначить лид (owner/rop). Manager не может назначать (вызывающий должен проверить роль).
+    assigned_user_id должен быть в tenant_users того же tenant. Lead должен принадлежать tenant.
+    """
+    lead = await get_lead_by_id(db, lead_id, current_user_id, multitenant_include_tenant_leads=multitenant_include_tenant_leads)
+    if not lead or not lead.tenant_id:
+        return None
+    role = await get_tenant_user_role(db, lead.tenant_id, current_user_id)
+    if role not in ("owner", "rop"):
+        return None
+    if assigned_user_id is not None:
+        target_in_tenant = await get_tenant_user(db, lead.tenant_id, assigned_user_id)
+        if not target_in_tenant:
+            return None
+    lead.assigned_user_id = assigned_user_id
+    if status is not None:
+        lead.status = status
+    await db.commit()
+    await db.refresh(lead)
+    return lead
+
+
+async def bulk_assign_leads(
+    db: AsyncSession,
+    lead_ids: List[int],
+    assigned_user_id: int,
+    current_user_id: int,
+    set_status: Optional[LeadStatus] = None,
+    *,
+    multitenant_include_tenant_leads: bool = False,
+) -> tuple[int, int, List[int]]:
+    """
+    Массовое назначение. Возвращает (assigned_count, skipped_count, skipped_ids).
+    Лиды не из tenant пользователя или без прав — пропуск.
+    """
+    assigned = 0
+    skipped_ids = []
+    for lid in lead_ids:
+        lead = await get_lead_by_id(db, lid, current_user_id, multitenant_include_tenant_leads=multitenant_include_tenant_leads)
+        if not lead or not lead.tenant_id:
+            skipped_ids.append(lid)
+            continue
+        role = await get_tenant_user_role(db, lead.tenant_id, current_user_id)
+        if role not in ("owner", "rop"):
+            skipped_ids.append(lid)
+            continue
+        target_in_tenant = await get_tenant_user(db, lead.tenant_id, assigned_user_id)
+        if not target_in_tenant:
+            skipped_ids.append(lid)
+            continue
+        lead.assigned_user_id = assigned_user_id
+        if set_status is not None:
+            lead.status = set_status
+        assigned += 1
+    if assigned:
+        await db.commit()
+    return assigned, len(skipped_ids), skipped_ids
+
+
+async def update_lead_fields(
+    db: AsyncSession,
+    lead_id: int,
+    current_user_id: int,
+    *,
+    status: Optional[LeadStatus] = None,
+    next_call_at: Optional[datetime] = None,
+    last_contact_at: Optional[datetime] = None,
+    assigned_user_id: Optional[int] = None,
+    multitenant_include_tenant_leads: bool = False,
+) -> Optional[Lead]:
+    """
+    PATCH лида. owner/rop: могут менять status, next_call_at, assigned_user_id.
+    manager: только status и next_call_at для своих лидов (assigned_user_id = current_user_id).
+    """
+    lead = await get_lead_by_id(db, lead_id, current_user_id, multitenant_include_tenant_leads=multitenant_include_tenant_leads)
+    if not lead:
+        return None
+    role = None
+    if lead.tenant_id:
+        role = await get_tenant_user_role(db, lead.tenant_id, current_user_id)
+    is_owner_rop = role in ("owner", "rop") or (lead.tenant_id and not role and lead.owner_id == current_user_id)
+    if status is not None:
+        lead.status = status
+    if next_call_at is not None:
+        lead.next_call_at = next_call_at
+    if last_contact_at is not None:
+        lead.last_contact_at = last_contact_at
+    if assigned_user_id is not None:
+        if not is_owner_rop:
+            pass  # manager не может менять назначение
+        else:
+            if assigned_user_id:
+                target_in_tenant = await get_tenant_user(db, lead.tenant_id, assigned_user_id) if lead.tenant_id else None
+                if lead.tenant_id and not target_in_tenant:
+                    pass
+                else:
+                    lead.assigned_user_id = assigned_user_id
+            else:
+                lead.assigned_user_id = None
+    await db.commit()
+    await db.refresh(lead)
     return lead
 
 
@@ -632,6 +770,25 @@ async def get_tenant_user(
         .where(TenantUser.user_id == user_id)
     )
     return result.scalar_one_or_none()
+
+
+async def get_tenant_user_role(db: AsyncSession, tenant_id: int, user_id: int) -> Optional[str]:
+    """
+    Роль пользователя в tenant: owner, rop, manager (или member как manager).
+    Если пользователь default_owner tenant — возвращаем "owner". Иначе из tenant_users.
+    """
+    tenant = await get_tenant_by_id(db, tenant_id)
+    if tenant and getattr(tenant, "default_owner_user_id", None) == user_id:
+        return "owner"
+    tu = await get_tenant_user(db, tenant_id, user_id)
+    if not tu or not tu.role:
+        return None
+    r = (tu.role or "").strip().lower()
+    if r in ("owner", "rop", "manager"):
+        return r
+    if r == "member":
+        return "manager"  # member = manager для доступа к лидам
+    return r
 
 
 async def list_tenant_users_with_user(

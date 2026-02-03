@@ -12,7 +12,15 @@ from app.api.deps import get_db, get_current_user
 from app.core.config import get_settings
 from app.database import crud
 from app.database.models import User
-from app.schemas.lead import LeadResponse, LeadCommentCreate, LeadCommentResponse, AIMuteUpdate
+from app.schemas.lead import (
+    LeadResponse,
+    LeadCommentCreate,
+    LeadCommentResponse,
+    AIMuteUpdate,
+    LeadAssignBody,
+    LeadBulkAssignBody,
+    LeadPatchBody,
+)
 from app.services import openai_service, telegram_service, conversation_service
 
 router = APIRouter()
@@ -244,25 +252,26 @@ async def get_leads(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Получить все заявки текущего пользователя.
-    Требует JWT токен. При MULTITENANT_ENABLED=true также показываются лиды
-    tenants, у которых default_owner_user_id = current_user.id.
+    Получить заявки: owner/rop — все лиды tenant; manager — только назначенные себе.
+    Поля: assigned_user_id, assigned_user_email, assigned_user_name, tenant_id, lead_number, next_call_at, last_contact_at.
     """
     settings = get_settings()
     multitenant = (getattr(settings, "multitenant_enabled", "false") or "false").upper() == "TRUE"
-    leads = await crud.get_user_leads(
-        db,
-        owner_id=current_user.id,
-        multitenant_include_tenant_leads=multitenant,
-    )
-    # Диагностика: по какому владельцу фильтруем и сколько лидов найдено
-    print(f"[GET /api/leads] current_user.id={current_user.id}, email={current_user.email}, leads_count={len(leads)}")
-    # Сериализация + last_comment (preview до 100 символов)
+    if multitenant:
+        leads = await crud.get_leads_for_user_crm(db, user_id=current_user.id)
+    else:
+        leads = await crud.get_user_leads(db, owner_id=current_user.id, multitenant_include_tenant_leads=False)
     leads_data = []
     for l in leads:
         item = LeadResponse.model_validate(l).model_dump()
         last_c = await crud.get_last_lead_comment(db, l.id)
         item["last_comment"] = (last_c.text[:100] if last_c and last_c.text else None) if last_c else None
+        aid = getattr(l, "assigned_user_id", None)
+        if aid:
+            u = await crud.get_user_by_id(db, aid)
+            if u:
+                item["assigned_user_email"] = u.email
+                item["assigned_user_name"] = getattr(u, "company_name", None)
         leads_data.append(item)
     return {"leads": leads_data, "total": len(leads_data)}
 
@@ -274,93 +283,119 @@ async def get_lead(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Получить одну заявку по ID.
-    Требует JWT токен. При MULTITENANT_ENABLED=true доступны также лиды tenant, где default_owner = user.
+    Получить одну заявку по ID. Доступ по ролям: owner/rop — все лиды tenant; manager — только назначенные.
     """
     multitenant = (getattr(get_settings(), "multitenant_enabled", "false") or "false").upper() == "TRUE"
     lead = await crud.get_lead_by_id(
         db, lead_id=lead_id, owner_id=current_user.id,
         multitenant_include_tenant_leads=multitenant,
     )
-    
     if not lead:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Lead with ID {lead_id} not found"
-        )
-    
-    return lead
+        raise HTTPException(status_code=404, detail=f"Lead with ID {lead_id} not found")
+    item = LeadResponse.model_validate(lead).model_dump()
+    aid = getattr(lead, "assigned_user_id", None)
+    if aid:
+        u = await crud.get_user_by_id(db, aid)
+        if u:
+            item["assigned_user_email"] = u.email
+            item["assigned_user_name"] = getattr(u, "company_name", None)
+    return item
 
 
 @router.patch("/leads/{lead_id}")
-async def update_lead_status(
+async def update_lead(
     lead_id: int,
-    status_update: dict,  # Принимаем {"status": "new" | "in_progress" | "success" | "failed"}
+    body: LeadPatchBody,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     """
-    Обновить статус заявки
-    
-    Требует JWT токен. Обновляет заявку только если она принадлежит владельцу токена.
-    
-    Допустимые статусы:
-    - `new` - Новая заявка
-    - `in_progress` - В работе
-    - `success` - Успешно завершена
-    - `failed` - Отказ/не удалось
-    
-    Пример запроса:
-    ```json
-    {
-      "status": "in_progress"
-    }
-    ```
+    Обновить лид: status, next_call_at, last_contact_at, assigned_user_id (owner/rop).
+    Manager может менять только status и next_call_at у своих лидов.
+    Обратная совместимость: передавайте только status как раньше.
     """
-    # Валидация статуса
-    allowed_statuses = ["new", "in_progress", "success", "failed"]
-    new_status_str = status_update.get("status")
-    
-    if not new_status_str or new_status_str not in allowed_statuses:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid status. Allowed: {', '.join(allowed_statuses)}"
-        )
-    
-    # Конвертируем в LeadStatus enum
     from app.database.models import LeadStatus
-    status_mapping = {
+    status_map = {
         "new": LeadStatus.NEW,
         "in_progress": LeadStatus.IN_PROGRESS,
-        "success": LeadStatus.DONE,  # "success" → DONE
-        "failed": LeadStatus.CANCELLED  # "failed" → CANCELLED
+        "success": LeadStatus.DONE,
+        "failed": LeadStatus.CANCELLED,
+        "done": LeadStatus.DONE,
+        "cancelled": LeadStatus.CANCELLED,
     }
-    
-    new_status = status_mapping[new_status_str]
-    
-    # Обновляем статус
+    new_status = None
+    if body.status is not None:
+        new_status = status_map.get((body.status or "").strip().lower())
+        if new_status is None:
+            raise HTTPException(status_code=400, detail="Invalid status. Allowed: new, in_progress, success, failed, done, cancelled")
     multitenant = (getattr(get_settings(), "multitenant_enabled", "false") or "false").upper() == "TRUE"
-    lead = await crud.update_lead_status(
+    lead = await crud.update_lead_fields(
         db,
         lead_id=lead_id,
-        owner_id=current_user.id,
+        current_user_id=current_user.id,
         status=new_status,
+        next_call_at=body.next_call_at,
+        last_contact_at=body.last_contact_at,
+        assigned_user_id=body.assigned_user_id,
         multitenant_include_tenant_leads=multitenant,
     )
-    
     if not lead:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Lead with ID {lead_id} not found"
-        )
-    
-    print(f"[OK] Lead #{lead_id} status updated: {new_status_str} (by user {current_user.id})")
-    
-    return {
-        "status": "success",
-        "message": f"Lead status updated to {new_status_str}",
-        "lead": lead
-    }
+        raise HTTPException(status_code=404, detail=f"Lead with ID {lead_id} not found")
+    return {"ok": True, "lead": LeadResponse.model_validate(lead).model_dump()}
+
+
+@router.patch("/leads/{lead_id}/assign", response_model=dict)
+async def assign_lead(
+    lead_id: int,
+    body: LeadAssignBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Назначить лид (owner/rop). Manager — 403.
+    Body: { "assigned_user_id": 123 | null, "status": "in_progress" (опционально) }.
+    """
+    multitenant = (getattr(get_settings(), "multitenant_enabled", "false") or "false").upper() == "TRUE"
+    lead = await crud.get_lead_by_id(db, lead_id, current_user.id, multitenant_include_tenant_leads=multitenant)
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    if not lead.tenant_id:
+        raise HTTPException(status_code=400, detail="Lead has no tenant_id")
+    role = await crud.get_tenant_user_role(db, lead.tenant_id, current_user.id)
+    if role not in ("owner", "rop"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only owner or rop can assign leads")
+    status_enum = None
+    if body.status:
+        from app.database.models import LeadStatus
+        status_map = {"new": LeadStatus.NEW, "in_progress": LeadStatus.IN_PROGRESS, "success": LeadStatus.DONE, "failed": LeadStatus.CANCELLED, "done": LeadStatus.DONE, "cancelled": LeadStatus.CANCELLED}
+        status_enum = status_map.get((body.status or "").strip().lower())
+    updated = await crud.update_lead_assignment(
+        db, lead_id, current_user.id, body.assigned_user_id, status=status_enum, multitenant_include_tenant_leads=multitenant
+    )
+    if not updated:
+        raise HTTPException(status_code=400, detail="Assignment failed (user not in tenant or invalid)")
+    return {"ok": True, "lead": LeadResponse.model_validate(updated).model_dump()}
+
+
+@router.post("/leads/assign/bulk", response_model=dict)
+async def bulk_assign_leads(
+    body: LeadBulkAssignBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Массовое назначение. owner/rop. Возвращает assigned, skipped, skipped_ids.
+    """
+    multitenant = (getattr(get_settings(), "multitenant_enabled", "false") or "false").upper() == "TRUE"
+    from app.database.models import LeadStatus
+    status_map = {"new": LeadStatus.NEW, "in_progress": LeadStatus.IN_PROGRESS, "success": LeadStatus.DONE, "failed": LeadStatus.CANCELLED, "done": LeadStatus.DONE, "cancelled": LeadStatus.CANCELLED}
+    set_status = None
+    if body.set_status:
+        set_status = status_map.get((body.set_status or "").strip().lower())
+    assigned, skipped, skipped_ids = await crud.bulk_assign_leads(
+        db, body.lead_ids, body.assigned_user_id, current_user.id, set_status=set_status, multitenant_include_tenant_leads=multitenant
+    )
+    return {"ok": True, "assigned": assigned, "skipped": skipped, "skipped_ids": skipped_ids}
 
 
 @router.delete("/leads/{lead_id}")

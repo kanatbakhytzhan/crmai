@@ -202,12 +202,16 @@ class Lead(Base):
     status = Column(SQLEnum(LeadStatus), default=LeadStatus.NEW)
     telegram_message_id = Column(Integer, nullable=True)
     lead_number = Column(Integer, nullable=True, index=True)  # CRM v2: порядковый номер (max+1 при создании)
+    assigned_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # CRM v2: кому назначен (manager/rop/owner)
+    next_call_at = Column(DateTime, nullable=True)   # когда перезвонить
+    last_contact_at = Column(DateTime, nullable=True)  # последнее касание
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
+
     # Relationships
-    owner = relationship("User", back_populates="leads")
+    owner = relationship("User", back_populates="leads", foreign_keys=[owner_id])
+    assigned_user = relationship("User", foreign_keys=[assigned_user_id])
     bot_user = relationship("BotUser", back_populates="leads")
     comments = relationship("LeadComment", back_populates="lead", cascade="all, delete-orphan")
 

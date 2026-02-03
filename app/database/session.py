@@ -335,6 +335,26 @@ async def init_db():
                 print("[OK] Kolonka leads.lead_number i unikalnost provereny/dobavleny")
             except Exception as e:
                 print(f"[WARN] leads.lead_number migration: {type(e).__name__}: {e}")
+            # leads: assigned_user_id, next_call_at, last_contact_at (CRM v2)
+            try:
+                await conn.execute(text(
+                    "ALTER TABLE leads ADD COLUMN IF NOT EXISTS assigned_user_id INTEGER REFERENCES users(id)"
+                ))
+                await conn.execute(text(
+                    "ALTER TABLE leads ADD COLUMN IF NOT EXISTS next_call_at TIMESTAMP"
+                ))
+                await conn.execute(text(
+                    "ALTER TABLE leads ADD COLUMN IF NOT EXISTS last_contact_at TIMESTAMP"
+                ))
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS idx_leads_tenant_id ON leads(tenant_id) WHERE tenant_id IS NOT NULL"
+                ))
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS idx_leads_assigned_user_id ON leads(assigned_user_id) WHERE assigned_user_id IS NOT NULL"
+                ))
+                print("[OK] Kolonki leads.assigned_user_id, next_call_at, last_contact_at provereny")
+            except Exception as e:
+                print(f"[WARN] leads CRM v2 columns: {type(e).__name__}: {e}")
     if "sqlite" in db_url:
         try:
             await conn.execute(text(
@@ -346,6 +366,15 @@ async def init_db():
                 print("[OK] SQLite: leads.lead_number uzhe est")
             else:
                 print(f"[WARN] leads.lead_number SQLite: {type(e).__name__}: {e}")
+        for col, typ in [("assigned_user_id", "INTEGER"), ("next_call_at", "DATETIME"), ("last_contact_at", "DATETIME")]:
+            try:
+                await conn.execute(text(f"ALTER TABLE leads ADD COLUMN {col} {typ}"))
+                print(f"[OK] SQLite: leads.{col} dobavlena")
+            except Exception as e:
+                if "duplicate column" in str(e).lower():
+                    print(f"[OK] SQLite: leads.{col} uzhe est")
+                else:
+                    print(f"[WARN] leads.{col} SQLite: {type(e).__name__}: {e}")
     print("[OK] Baza dannyh initializirovana")
 
 

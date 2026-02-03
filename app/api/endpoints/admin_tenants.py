@@ -148,7 +148,7 @@ async def list_tenant_users(
     return {"users": items, "total": len(items)}
 
 
-@router.post("/tenants/{tenant_id}/users", response_model=TenantUserResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/tenants/{tenant_id}/users", status_code=status.HTTP_201_CREATED)
 async def add_tenant_user(
     tenant_id: int,
     body: TenantUserAdd,
@@ -157,27 +157,38 @@ async def add_tenant_user(
 ):
     """
     Добавить пользователя к tenant по email и role.
-    Body: { "email": "user@mail.com", "role": "manager" | "admin" | "member" }.
-    Если пользователь уже в tenant — возвращаем существующую запись (не 409).
+    Body: { "email": "user@mail.com", "role": "owner" | "rop" | "manager" }.
+    Если пользователя нет — создаём с временным паролем (temporary_password в ответе один раз).
     """
+    import secrets
     tenant = await crud.get_tenant_by_id(db, tenant_id)
     if not tenant:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
-    user = await crud.get_user_by_email(db, email=body.email)
+    user = await crud.get_user_by_email(db, email=body.email.strip())
+    temporary_password = None
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="user_not_found")
-    role = (body.role or "member").strip().lower() or "member"
-    if role not in ("manager", "admin", "member"):
-        role = "member"
+        temporary_password = secrets.token_urlsafe(12)
+        user = await crud.create_user(
+            db, email=body.email.strip(), password=temporary_password, company_name=body.email.strip().split("@")[0] or "User"
+        )
+    role = (body.role or "member").strip().lower() or "manager"
+    if role not in ("owner", "rop", "manager", "admin", "member"):
+        role = "manager"
     tu = await crud.create_tenant_user(db, tenant_id=tenant_id, user_id=user.id, role=role)
-    return TenantUserResponse(
-        id=tu.id,
-        user_id=user.id,
-        email=user.email,
-        company_name=user.company_name,
-        role=tu.role or "member",
-        created_at=tu.created_at,
-    )
+    out = {
+        "ok": True,
+        "user": TenantUserResponse(
+            id=tu.id,
+            user_id=user.id,
+            email=user.email,
+            company_name=user.company_name,
+            role=tu.role or role,
+            created_at=tu.created_at,
+        ),
+    }
+    if temporary_password:
+        out["temporary_password"] = temporary_password
+    return out
 
 
 @router.delete("/tenants/{tenant_id}/users/{user_id}")

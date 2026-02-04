@@ -43,6 +43,50 @@ def _safe_json_error(detail: str, status_code: int = 500) -> JSONResponse:
     )
 
 
+def _normalize_amocrm_domain(raw_input: str) -> str:
+    """
+    Normalize AmoCRM domain from various input formats to just the host.
+    
+    Accepts:
+        - "company.amocrm.ru"
+        - "https://company.amocrm.ru"
+        - "https://company.amocrm.ru/leads/"
+        - "http://company.amocrm.ru/leads/pipeline/123"
+        - "company.kommo.com/anything"
+    
+    Returns:
+        - "company.amocrm.ru" (just the host, lowercase)
+    """
+    from urllib.parse import urlparse
+    
+    domain = (raw_input or "").strip().lower()
+    if not domain:
+        return ""
+    
+    # If it doesn't have a scheme, add one for parsing
+    if not domain.startswith(("http://", "https://")):
+        domain = "https://" + domain
+    
+    try:
+        parsed = urlparse(domain)
+        host = parsed.netloc or parsed.path.split("/")[0]
+        # Remove port if present
+        host = host.split(":")[0]
+        return host.lower().strip()
+    except Exception:
+        # Fallback: manual parsing
+        domain = raw_input.strip().lower()
+        if domain.startswith("https://"):
+            domain = domain[8:]
+        elif domain.startswith("http://"):
+            domain = domain[7:]
+        # Remove path
+        domain = domain.split("/")[0]
+        # Remove port
+        domain = domain.split(":")[0]
+        return domain.strip()
+
+
 async def _require_tenant_access(db: AsyncSession, tenant_id: int, current_user: User) -> str:
     """
     Проверка доступа к настройкам tenant. Возвращает роль.
@@ -325,6 +369,7 @@ async def update_tenant_settings(
         return _safe_json_error(f"Access check failed: {type(e).__name__}", 403)
     
     try:
+        # Try ORM update first
         tenant = await crud.update_tenant(
             db,
             tenant_id,
@@ -338,13 +383,69 @@ async def update_tenant_settings(
             return JSONResponse(status_code=404, content={"ok": False, "detail": "Tenant not found"})
         
         print(f"[INFO] update_tenant_settings: tenant_id={tenant_id}, updated fields={body.model_dump(exclude_unset=True)}")
-        response = await _build_tenant_settings_response(db, tenant_id, tenant)
+        
+        # Use the wrapper class for building response
+        class TenantWrapper:
+            def __init__(self, data):
+                for k, v in data.items():
+                    setattr(self, k, v)
+        
+        tenant_data = await _get_tenant_with_fallback(db, tenant_id)
+        if not tenant_data:
+            return JSONResponse(status_code=404, content={"ok": False, "detail": "Tenant not found after update"})
+        
+        response = await _build_tenant_settings_response(db, tenant_id, TenantWrapper(tenant_data))
         return response
         
     except Exception as e:
-        print(f"[ERROR] update_tenant_settings failed for tenant {tenant_id}: {type(e).__name__}: {e}")
+        error_name = type(e).__name__
+        error_str = str(e)
+        print(f"[ERROR] update_tenant_settings ORM failed for tenant {tenant_id}: {error_name}: {e}")
+        
+        # Fallback: try raw SQL update for the fields that exist
+        if any(x in error_name for x in ["OperationalError", "ProgrammingError"]) or \
+           any(x in error_str for x in ["no such column", "column", "does not exist"]):
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            
+            try:
+                from sqlalchemy import text
+                # Build update query for fields that likely exist
+                updates = []
+                params = {"tid": tenant_id}
+                
+                # Only update fields that were actually provided
+                update_data = body.model_dump(exclude_unset=True)
+                
+                # These are the core fields that should exist
+                for field in ["ai_prompt"]:
+                    if field in update_data and update_data[field] is not None:
+                        updates.append(f"{field} = :{field}")
+                        params[field] = update_data[field]
+                
+                if updates:
+                    query = f"UPDATE tenants SET {', '.join(updates)} WHERE id = :tid"
+                    await db.execute(text(query), params)
+                    await db.commit()
+                    print(f"[INFO] update_tenant_settings: used raw SQL fallback for tenant {tenant_id}")
+                
+                # Fetch and return updated tenant
+                tenant_data = await _get_tenant_with_fallback(db, tenant_id)
+                if tenant_data:
+                    class TenantWrapper:
+                        def __init__(self, data):
+                            for k, v in data.items():
+                                setattr(self, k, v)
+                    response = await _build_tenant_settings_response(db, tenant_id, TenantWrapper(tenant_data))
+                    return response
+                    
+            except Exception as e2:
+                print(f"[ERROR] Raw SQL update also failed: {e2}")
+        
         traceback.print_exc()
-        return _safe_json_error(f"Failed to update settings: {type(e).__name__}")
+        return _safe_json_error(f"Failed to update settings: {error_name}")
 
 
 # ========== AmoCRM Integration ==========
@@ -377,7 +478,47 @@ async def get_amocrm_auth_url(
     
     print(f"[INFO] get_amocrm_auth_url: tenant_id={tenant_id}, base_domain_query={base_domain}")
     
-    # Check ENV variables first
+    # Step 1: Determine and normalize base_domain FIRST (before checking ENV)
+    domain = (base_domain or "").strip()
+    if not domain:
+        try:
+            tenant_data = await _get_tenant_with_fallback(db, tenant_id)
+            if tenant_data:
+                domain = (tenant_data.get("amocrm_base_domain") or "").strip()
+        except Exception as e:
+            print(f"[WARN] Failed to get tenant for domain: {e}")
+    
+    # Normalize domain - extract host from any URL format
+    # Accepts: "company.amocrm.ru", "https://company.amocrm.ru", "https://company.amocrm.ru/leads/pipeline"
+    original_domain = domain
+    domain = _normalize_amocrm_domain(domain)
+    
+    if original_domain and original_domain != domain:
+        print(f"[INFO] Normalized domain: '{original_domain}' -> '{domain}'")
+    
+    # Step 2: Validate domain format BEFORE checking ENV
+    if not domain:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "ok": False,
+                "detail": "base_domain is required. Example: company.amocrm.ru or company.kommo.com",
+                "code": "BASE_DOMAIN_REQUIRED"
+            }
+        )
+    
+    # Validate domain format
+    if not re.match(r"^[\w\-]+\.(amocrm\.ru|kommo\.com)$", domain, re.IGNORECASE):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "ok": False,
+                "detail": f"Invalid base_domain format: '{domain}'. Must end with .amocrm.ru or .kommo.com (e.g. company.amocrm.ru)",
+                "code": "INVALID_DOMAIN_FORMAT"
+            }
+        )
+    
+    # Step 3: Now check ENV variables
     from app.core.config import get_settings
     settings = get_settings()
     amo_client_id = getattr(settings, "amo_client_id", None)
@@ -403,45 +544,7 @@ async def get_amocrm_auth_url(
             }
         )
     
-    # Determine base_domain: from query or from tenant settings
-    domain = (base_domain or "").strip().lower()
-    if not domain:
-        try:
-            tenant = await crud.get_tenant_by_id(db, tenant_id)
-            if tenant:
-                domain = (getattr(tenant, "amocrm_base_domain", None) or "").strip().lower()
-        except Exception as e:
-            print(f"[WARN] Failed to get tenant for domain: {e}")
-    
-    # Normalize domain - strip protocol and trailing slash
-    if domain.startswith("https://"):
-        domain = domain[8:]
-    elif domain.startswith("http://"):
-        domain = domain[7:]
-    domain = domain.rstrip("/").lower()
-    
-    if not domain:
-        return JSONResponse(
-            status_code=422,
-            content={
-                "ok": False,
-                "detail": "base_domain is required. Example: baxa.amocrm.ru",
-                "code": "BASE_DOMAIN_REQUIRED"
-            }
-        )
-    
-    # Validate domain format
-    if not re.match(r"^[\w\-]+\.(amocrm\.ru|kommo\.com)$", domain, re.IGNORECASE):
-        return JSONResponse(
-            status_code=422,
-            content={
-                "ok": False,
-                "detail": f"Invalid base_domain format: '{domain}'. Must be like 'company.amocrm.ru' or 'company.kommo.com'",
-                "code": "INVALID_DOMAIN_FORMAT"
-            }
-        )
-    
-    # Build auth URL
+    # Domain was already validated above, proceed to build auth URL
     try:
         url = amocrm_service.build_auth_url(tenant_id, domain)
         if not url:
@@ -759,6 +862,120 @@ async def tenant_snapshot(
         print(f"[ERROR] tenant_snapshot failed for tenant {tenant_id}: {e}")
         traceback.print_exc()
         return _safe_json_error(f"Failed to get snapshot: {type(e).__name__}")
+
+
+# ========== Debug Endpoint for Access Troubleshooting ==========
+
+@router.get("/tenants/{tenant_id}/settings/debug", summary="Debug access control for tenant settings", tags=["Diagnostics"])
+async def tenant_settings_debug(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Debug endpoint to help troubleshoot access control issues.
+    Returns detailed information about the current user's access to the requested tenant.
+    
+    This endpoint does NOT require tenant access - it just reports what access the user would have.
+    """
+    from sqlalchemy import text
+    
+    user_id = current_user.id
+    user_email = getattr(current_user, "email", "unknown")
+    is_admin = getattr(current_user, "is_admin", False)
+    
+    result = {
+        "ok": True,
+        "debug": {
+            "current_user": {
+                "id": user_id,
+                "email": user_email,
+                "is_admin": is_admin,
+            },
+            "requested_tenant_id": tenant_id,
+            "access_decision": {
+                "is_admin": is_admin,
+                "is_owner": False,
+                "is_rop": False,
+                "is_manager": False,
+                "has_tenant_access": False,
+                "allowed": False,
+                "reason": "",
+            },
+            "tenant_info": None,
+            "user_role_in_tenant": None,
+        }
+    }
+    
+    # Check if admin
+    if is_admin:
+        result["debug"]["access_decision"]["allowed"] = True
+        result["debug"]["access_decision"]["has_tenant_access"] = True
+        result["debug"]["access_decision"]["reason"] = "User is admin (is_admin=True), can access any tenant"
+    
+    # Check tenant exists and get user's role
+    try:
+        # Try to get tenant info via raw SQL to avoid column issues
+        tenant_result = await db.execute(text(
+            "SELECT id, name, slug, is_active, default_owner_user_id FROM tenants WHERE id = :tid"
+        ), {"tid": tenant_id})
+        tenant_row = tenant_result.fetchone()
+        
+        if tenant_row:
+            result["debug"]["tenant_info"] = {
+                "id": tenant_row[0],
+                "name": tenant_row[1],
+                "slug": tenant_row[2],
+                "is_active": tenant_row[3],
+                "default_owner_user_id": tenant_row[4],
+            }
+            
+            # Check if user is default owner
+            if tenant_row[4] == user_id:
+                result["debug"]["access_decision"]["is_owner"] = True
+                result["debug"]["access_decision"]["allowed"] = True
+                result["debug"]["access_decision"]["has_tenant_access"] = True
+                result["debug"]["access_decision"]["reason"] = "User is default_owner_user_id of tenant"
+        else:
+            result["debug"]["access_decision"]["reason"] = f"Tenant {tenant_id} not found"
+            result["debug"]["tenant_info"] = {"error": "Tenant not found"}
+        
+        # Check tenant_users table
+        tu_result = await db.execute(text(
+            "SELECT role FROM tenant_users WHERE tenant_id = :tid AND user_id = :uid"
+        ), {"tid": tenant_id, "uid": user_id})
+        tu_row = tu_result.fetchone()
+        
+        if tu_row:
+            role = (tu_row[0] or "").strip().lower()
+            if role == "member":
+                role = "manager"
+            result["debug"]["user_role_in_tenant"] = role
+            
+            if role == "owner":
+                result["debug"]["access_decision"]["is_owner"] = True
+                result["debug"]["access_decision"]["allowed"] = True
+                result["debug"]["access_decision"]["has_tenant_access"] = True
+                result["debug"]["access_decision"]["reason"] = "User has role=owner in tenant_users"
+            elif role == "rop":
+                result["debug"]["access_decision"]["is_rop"] = True
+                result["debug"]["access_decision"]["allowed"] = True
+                result["debug"]["access_decision"]["has_tenant_access"] = True
+                result["debug"]["access_decision"]["reason"] = "User has role=rop in tenant_users"
+            elif role == "manager":
+                result["debug"]["access_decision"]["is_manager"] = True
+                result["debug"]["access_decision"]["allowed"] = False
+                result["debug"]["access_decision"]["reason"] = "User has role=manager, cannot access admin settings"
+        else:
+            if not result["debug"]["access_decision"]["allowed"]:
+                result["debug"]["user_role_in_tenant"] = None
+                if not is_admin:
+                    result["debug"]["access_decision"]["reason"] = f"User {user_email} has no role in tenant {tenant_id} and is not admin"
+                    
+    except Exception as e:
+        result["debug"]["error"] = f"Failed to check access: {type(e).__name__}: {str(e)[:200]}"
+    
+    return result
 
 
 # ========== Self-Check Endpoint ==========

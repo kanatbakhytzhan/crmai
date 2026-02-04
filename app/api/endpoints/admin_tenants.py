@@ -27,9 +27,27 @@ router = APIRouter()
 
 
 def _tenant_response(tenant, base_url: str) -> dict:
-    """TenantResponse с вычисляемым webhook_url."""
-    from app.schemas.tenant import TenantResponse
-    data = TenantResponse.model_validate(tenant).model_dump()
+    """TenantResponse с вычисляемым webhook_url. Handles missing columns gracefully."""
+    try:
+        from app.schemas.tenant import TenantResponse
+        data = TenantResponse.model_validate(tenant).model_dump()
+    except Exception:
+        # Fallback if model_validate fails (e.g., missing columns in DB)
+        data = {
+            "id": tenant.id,
+            "name": tenant.name,
+            "slug": tenant.slug,
+            "is_active": tenant.is_active,
+            "default_owner_user_id": getattr(tenant, "default_owner_user_id", None),
+            "ai_enabled": getattr(tenant, "ai_enabled", True),
+            "ai_prompt": getattr(tenant, "ai_prompt", None),
+            "webhook_key": getattr(tenant, "webhook_key", None),
+            "webhook_url": None,
+            "whatsapp_source": getattr(tenant, "whatsapp_source", "chatflow") or "chatflow",
+            "ai_enabled_global": getattr(tenant, "ai_enabled_global", True),
+            "ai_after_lead_submitted_behavior": getattr(tenant, "ai_after_lead_submitted_behavior", "polite_close"),
+            "created_at": tenant.created_at,
+        }
     base = (base_url or "").rstrip("/")
     if getattr(tenant, "webhook_key", None) and base:
         data["webhook_url"] = f"{base}/api/chatflow/webhook?key={tenant.webhook_key}"
@@ -115,10 +133,16 @@ async def list_tenants(
     current_user: User = Depends(get_current_admin),
 ):
     """Список tenants. В каждом tenant есть webhook_key и webhook_url."""
-    from app.core.config import get_settings
-    tenants = await crud.list_tenants(db)
-    base_url = get_settings().public_base_url or str(request.base_url).rstrip("/")
-    return {"tenants": [_tenant_response(t, base_url) for t in tenants], "total": len(tenants)}
+    import traceback
+    try:
+        from app.core.config import get_settings
+        tenants = await crud.list_tenants(db)
+        base_url = get_settings().public_base_url or str(request.base_url).rstrip("/")
+        return {"tenants": [_tenant_response(t, base_url) for t in tenants], "total": len(tenants)}
+    except Exception as e:
+        print(f"[ERROR] list_tenants failed: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Internal error: {type(e).__name__}")
 
 
 async def _require_tenant_admin_or_owner_rop(db: AsyncSession, tenant_id: int, current_user: User) -> str | None:

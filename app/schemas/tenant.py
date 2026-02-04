@@ -327,6 +327,9 @@ class WhatsAppAccountResponse(BaseModel):
     updated_at: Optional[datetime] = None
     chatflow_token_masked: Optional[str] = None
     chatflow_instance_id: Optional[str] = None
+    # New verification fields
+    chatflow_token_present: bool = False
+    binding_hash: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -354,6 +357,10 @@ class WhatsAppSaved(BaseModel):
     active: bool
     chatflow_instance_id: Optional[str] = None
     chatflow_token: Optional[str] = None  # полное значение, чтобы фронт видел что сохранилось
+    # New verification fields
+    chatflow_token_present: bool = False
+    binding_hash: Optional[str] = None
+    updated_at: Optional[datetime] = None
 
 
 # ========== CRM v3: Auto Assign Rules ==========

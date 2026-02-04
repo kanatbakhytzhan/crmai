@@ -513,26 +513,67 @@ async def upsert_whatsapp(
         
         # Verify what was saved (read-after-write)
         await db.refresh(acc)
-        saved_token_len = len(getattr(acc, "chatflow_token", None) or "")
-        print(f"[ADMIN PUT] whatsapp saved id={acc.id} token_len={saved_token_len} instance={acc.chatflow_instance_id}")
         
-        return WhatsAppAccountResponse.model_validate(acc)
+        # Manually construct response to include computed fields
+        saved_token = getattr(acc, "chatflow_token", None) or ""
+        token_present = bool(saved_token.strip())
+        instance_id = getattr(acc, "chatflow_instance_id", None)
+        phone = acc.phone_number
+        active = getattr(acc, "is_active", True)
+        
+        binding_hash = _calculate_binding_hash(instance_id, phone, active, token_present)
+        
+        # Using model_validate won't work easily for computed fields if they aren't properties
+        # So we construct dict first
+        resp_data = {
+            "id": acc.id,
+            "tenant_id": acc.tenant_id,
+            "phone_number": phone,
+            "phone_number_id": acc.phone_number_id,
+            "waba_id": acc.waba_id,
+            "is_active": active,
+            "created_at": acc.created_at,
+            "updated_at": getattr(acc, "updated_at", None),
+            "chatflow_token_masked": acc.chatflow_token_masked,
+            "chatflow_instance_id": instance_id,
+            "chatflow_token_present": token_present,
+            "binding_hash": binding_hash,
+        }
+        return WhatsAppAccountResponse.model_validate(resp_data)
     except Exception as e:
         print(f"[ERROR] upsert_whatsapp failed: {type(e).__name__}: {e}")
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"ok": False, "detail": f"Failed to save WhatsApp: {type(e).__name__}"})
 
 
+
+def _calculate_binding_hash(instance_id: str | None, phone: str | None, active: bool, token_present: bool) -> str:
+    """Calculate hash of binding state to help frontend detect discrepancies."""
+    import hashlib
+    raw = f"{instance_id or ''}:{phone or ''}:{str(active).lower()}:{str(token_present).lower()}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
 def _whatsapp_to_saved(acc) -> WhatsAppSaved:
-    """Собрать объект сохранённой привязки для ответа (id, tenant_id, phone_number, active, chatflow_instance_id, chatflow_token)."""
+    """Собрать объект сохранённой привязки для ответа."""
+    token = (getattr(acc, "chatflow_token", None) or "").strip()
+    token_present = bool(token)
+    instance_id = getattr(acc, "chatflow_instance_id", None) or None
+    phone = acc.phone_number or "—"
+    active = getattr(acc, "is_active", True)
+    
     return WhatsAppSaved(
         id=acc.id,
         tenant_id=acc.tenant_id,
-        phone_number=acc.phone_number or "—",
-        active=getattr(acc, "is_active", True),
-        chatflow_instance_id=getattr(acc, "chatflow_instance_id", None) or None,
-        chatflow_token=(getattr(acc, "chatflow_token", None) or "").strip() or None,
+        phone_number=phone,
+        active=active,
+        chatflow_instance_id=instance_id,
+        chatflow_token=token if token else None,
+        chatflow_token_present=token_present,
+        binding_hash=_calculate_binding_hash(instance_id, phone, active, token_present),
+        updated_at=getattr(acc, "updated_at", None) or getattr(acc, "created_at", None),
     )
+
 
 
 @router.post("/tenants/{tenant_id}/whatsapp", status_code=status.HTTP_201_CREATED)

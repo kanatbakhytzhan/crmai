@@ -46,13 +46,19 @@ class TenantResponse(BaseModel):
 # ========== Universal Admin Console: Tenant Settings ==========
 
 class ChatFlowBindingSnapshot(BaseModel):
-    """Snapshot of ChatFlow binding for tenant settings response."""
+    """
+    Snapshot of ChatFlow binding for tenant settings response.
+    
+    For admin/owner: chatflow_token contains the FULL token.
+    For other roles: chatflow_token is None, only chatflow_token_masked is returned.
+    """
     binding_exists: bool = False
     is_active: bool = False
     accounts_count: int = 0
     phone_number: Optional[str] = None
     chatflow_instance_id: Optional[str] = None
     chatflow_token_masked: Optional[str] = None
+    chatflow_token: Optional[str] = None  # Full token for admin/owner only
 
 
 class AmoCRMSnapshot(BaseModel):

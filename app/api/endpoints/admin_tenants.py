@@ -828,3 +828,82 @@ async def check_whatsapp_health(
             status_code=500,
             content={"ok": False, "detail": f"Health check failed: {type(e).__name__}"}
         )
+
+
+@router.get("/tenants/{tenant_id}/whatsapp/status", summary="Quick WhatsApp binding status", tags=["WhatsApp"])
+async def get_whatsapp_status(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_or_owner_or_rop),
+):
+    """
+    Quick status of WhatsApp binding for tenant (no external API calls).
+    
+    Returns:
+        {
+            ok: true,
+            binding_exists: bool,
+            is_active: bool,
+            phone_number: string|null,
+            instance_id: string|null,
+            token_masked: string|null,
+            token_present: bool,
+            last_error: string|null (if stored)
+        }
+    """
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import text
+    
+    try:
+        # Check tenant exists
+        result = await db.execute(text("SELECT id FROM tenants WHERE id = :tid"), {"tid": tenant_id})
+        if not result.fetchone():
+            return JSONResponse(status_code=404, content={"ok": False, "detail": "Tenant not found"})
+        
+        # Get WhatsApp account
+        acc = await crud.get_active_chatflow_account_for_tenant(db, tenant_id)
+        
+        if not acc:
+            return {
+                "ok": True,
+                "binding_exists": False,
+                "is_active": False,
+                "phone_number": None,
+                "instance_id": None,
+                "token_masked": None,
+                "token_present": False,
+                "last_error": None,
+            }
+        
+        token = getattr(acc, "chatflow_token", None) or ""
+        instance_id = getattr(acc, "chatflow_instance_id", None) or ""
+        phone = getattr(acc, "phone_number", None)
+        is_active = getattr(acc, "is_active", False)
+        
+        # Mask token
+        if len(token) > 6:
+            token_masked = token[:4] + "***" + token[-2:]
+        elif token:
+            token_masked = "***"
+        else:
+            token_masked = None
+        
+        return {
+            "ok": True,
+            "binding_exists": True,
+            "is_active": is_active,
+            "phone_number": phone,
+            "instance_id": instance_id or None,
+            "token_masked": token_masked,
+            "token_present": bool(token.strip()),
+            "last_error": None,  # Could be stored in DB if we add that column
+        }
+        
+    except Exception as e:
+        import traceback
+        print(f"[ERROR] get_whatsapp_status failed: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "detail": f"Status check failed: {type(e).__name__}"}
+        )

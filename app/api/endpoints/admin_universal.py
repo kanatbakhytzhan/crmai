@@ -170,8 +170,24 @@ async def _require_tenant_access(db: AsyncSession, tenant_id: int, current_user:
 
 # ========== Tenant Settings ==========
 
-async def _build_tenant_settings_response(db: AsyncSession, tenant_id: int, tenant) -> TenantSettingsResponse:
-    """Build a complete TenantSettingsResponse with all fields and safe defaults."""
+async def _build_tenant_settings_response(
+    db: AsyncSession, 
+    tenant_id: int, 
+    tenant, 
+    user_role: str = "manager"
+) -> TenantSettingsResponse:
+    """
+    Build a complete TenantSettingsResponse with all fields and safe defaults.
+    
+    Args:
+        db: Database session
+        tenant_id: Tenant ID
+        tenant: Tenant object or wrapper
+        user_role: User role (admin/owner get full credentials, others get masked)
+    """
+    # Determine if user should see full credentials
+    is_privileged = user_role in ("admin", "owner")
+    
     # Settings block
     ai_prompt_raw = getattr(tenant, "ai_prompt", None) or ""
     settings = TenantSettingsBlock(
@@ -183,9 +199,14 @@ async def _build_tenant_settings_response(db: AsyncSession, tenant_id: int, tena
         amocrm_base_domain=getattr(tenant, "amocrm_base_domain", None),
     )
     
-    # WhatsApp snapshot
+    # Log ai_prompt for debugging
+    print(f"[DEBUG] tenant {tenant_id} ai_prompt_len={len(ai_prompt_raw)}, is_privileged={is_privileged}")
+    
+    # WhatsApp snapshot - include full token for admin/owner
     try:
-        whatsapp_snapshot_dict = await crud.get_chatflow_binding_snapshot(db, tenant_id)
+        whatsapp_snapshot_dict = await crud.get_chatflow_binding_snapshot(
+            db, tenant_id, include_full_token=is_privileged
+        )
         whatsapp_snapshot = ChatFlowBindingSnapshot(
             binding_exists=whatsapp_snapshot_dict.get("binding_exists", False),
             is_active=whatsapp_snapshot_dict.get("is_active", False),
@@ -193,6 +214,7 @@ async def _build_tenant_settings_response(db: AsyncSession, tenant_id: int, tena
             phone_number=whatsapp_snapshot_dict.get("phone_number"),
             chatflow_instance_id=whatsapp_snapshot_dict.get("chatflow_instance_id"),
             chatflow_token_masked=whatsapp_snapshot_dict.get("chatflow_token_masked"),
+            chatflow_token=whatsapp_snapshot_dict.get("chatflow_token") if is_privileged else None,
         )
     except Exception as e:
         print(f"[WARN] Failed to get whatsapp snapshot for tenant {tenant_id}: {e}")
@@ -250,12 +272,15 @@ async def _get_tenant_with_fallback(db: AsyncSession, tenant_id: int) -> dict | 
     try:
         tenant = await crud.get_tenant_by_id(db, tenant_id)
         if tenant:
+            ai_prompt = getattr(tenant, "ai_prompt", None)
+            # Ensure ai_prompt is never None in response
+            ai_prompt_str = ai_prompt if ai_prompt is not None else ""
             return {
                 "id": tenant.id,
                 "name": tenant.name,
                 "slug": tenant.slug,
                 "is_active": tenant.is_active,
-                "ai_prompt": getattr(tenant, "ai_prompt", None) or "",
+                "ai_prompt": ai_prompt_str,
                 "ai_enabled": getattr(tenant, "ai_enabled", True),
                 "whatsapp_source": getattr(tenant, "whatsapp_source", "chatflow") or "chatflow",
                 "ai_enabled_global": getattr(tenant, "ai_enabled_global", True),
@@ -277,12 +302,44 @@ async def _get_tenant_with_fallback(db: AsyncSession, tenant_id: int) -> dict | 
         else:
             raise
     
-    # Fallback to raw SQL with minimal columns
+    # Fallback to raw SQL - try to get all Universal Admin columns
+    try:
+        # Try full column set first
+        sql = """
+            SELECT id, name, slug, is_active, 
+                   ai_prompt, ai_enabled, whatsapp_source, ai_enabled_global,
+                   ai_after_lead_submitted_behavior, amocrm_base_domain
+            FROM tenants WHERE id = :tid
+        """
+        result = await db.execute(text(sql), {"tid": tenant_id})
+        row = result.fetchone()
+        if row:
+            print(f"[INFO] Got tenant {tenant_id} via full raw SQL")
+            return {
+                "id": row[0],
+                "name": row[1],
+                "slug": row[2],
+                "is_active": row[3],
+                "ai_prompt": row[4] if row[4] is not None else "",
+                "ai_enabled": row[5] if row[5] is not None else True,
+                "whatsapp_source": row[6] if row[6] else "chatflow",
+                "ai_enabled_global": row[7] if row[7] is not None else True,
+                "ai_after_lead_submitted_behavior": row[8] if row[8] else "polite_close",
+                "amocrm_base_domain": row[9],
+            }
+    except Exception as e1:
+        print(f"[WARN] Full raw SQL failed for tenant {tenant_id}: {e1}")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+    
+    # Fallback to minimal columns
     try:
         result = await db.execute(text("SELECT id, name, slug, is_active, created_at FROM tenants WHERE id = :tid"), {"tid": tenant_id})
         row = result.fetchone()
         if row:
-            print(f"[INFO] Got tenant {tenant_id} via raw SQL fallback")
+            print(f"[INFO] Got tenant {tenant_id} via minimal raw SQL fallback")
             return {
                 "id": row[0],
                 "name": row[1],
@@ -309,8 +366,13 @@ async def get_tenant_settings(
 ):
     """
     Получить настройки tenant со снапшотами WhatsApp и AmoCRM.
+    
+    For admin/owner: returns FULL chatflow_token and ai_prompt.
+    For rop/manager: returns chatflow_token_masked only.
+    
     ALWAYS returns complete structure with ok:true/false.
     """
+    user_role = "manager"  # Default to least privileged
     try:
         user_role = await _require_tenant_access(db, tenant_id, current_user)
         print(f"[INFO] get_tenant_settings: user_role={user_role}, tenant_id={tenant_id}")
@@ -330,7 +392,7 @@ async def get_tenant_settings(
             )
         
         # Build response using tenant_data dict
-        print(f"[INFO] get_tenant_settings: tenant_id={tenant_id}, name={tenant_data.get('name')}")
+        print(f"[INFO] get_tenant_settings: tenant_id={tenant_id}, name={tenant_data.get('name')}, ai_prompt_len={len(tenant_data.get('ai_prompt', ''))}")
         
         # Create a simple object-like wrapper for tenant_data
         class TenantWrapper:
@@ -339,7 +401,7 @@ async def get_tenant_settings(
                     setattr(self, k, v)
         
         tenant = TenantWrapper(tenant_data)
-        response = await _build_tenant_settings_response(db, tenant_id, tenant)
+        response = await _build_tenant_settings_response(db, tenant_id, tenant, user_role=user_role)
         return response
         
     except Exception as e:
@@ -436,7 +498,8 @@ async def update_tenant_settings(
                 for k, v in data.items():
                     setattr(self, k, v)
         
-        response = await _build_tenant_settings_response(db, tenant_id, TenantWrapper(tenant_data))
+        # Pass user_role to include full credentials for admin/owner
+        response = await _build_tenant_settings_response(db, tenant_id, TenantWrapper(tenant_data), user_role=user_role)
         return response
         
     except Exception as e:

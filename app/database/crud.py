@@ -1593,10 +1593,15 @@ async def list_whatsapp_accounts_by_tenant(
     return list(result.scalars().all())
 
 
-async def get_chatflow_binding_snapshot(db: AsyncSession, tenant_id: int) -> dict:
+async def get_chatflow_binding_snapshot(db: AsyncSession, tenant_id: int, include_full_token: bool = False) -> dict:
     """
     Get ChatFlow binding snapshot for tenant settings response.
-    Returns dict with is_active, phone_number, chatflow_instance_id, chatflow_token_masked, binding_exists, accounts_count.
+    
+    Returns dict with:
+        - binding_exists, is_active, accounts_count
+        - phone_number, chatflow_instance_id
+        - chatflow_token_masked (always)
+        - chatflow_token (only if include_full_token=True, for admin/owner)
     """
     accounts = await list_whatsapp_accounts_by_tenant(db, tenant_id)
     if not accounts:
@@ -1607,10 +1612,13 @@ async def get_chatflow_binding_snapshot(db: AsyncSession, tenant_id: int) -> dic
             "phone_number": None,
             "chatflow_instance_id": None,
             "chatflow_token_masked": None,
+            "chatflow_token": None,
         }
     # Get first (or active) account
     acc = next((a for a in accounts if a.is_active), accounts[0])
     token = getattr(acc, "chatflow_token", None) or ""
+    instance_id = getattr(acc, "chatflow_instance_id", None) or ""
+    
     # Mask token: first 4 chars + *** + last 2 chars
     if len(token) > 6:
         token_masked = token[:4] + "***" + token[-2:]
@@ -1618,14 +1626,23 @@ async def get_chatflow_binding_snapshot(db: AsyncSession, tenant_id: int) -> dic
         token_masked = "***"
     else:
         token_masked = None
-    return {
+    
+    result = {
         "binding_exists": True,
         "is_active": acc.is_active,
         "accounts_count": len(accounts),
         "phone_number": acc.phone_number or None,
-        "chatflow_instance_id": getattr(acc, "chatflow_instance_id", None),
+        "chatflow_instance_id": instance_id or None,
         "chatflow_token_masked": token_masked,
     }
+    
+    # Include full token only for privileged roles
+    if include_full_token:
+        result["chatflow_token"] = token if token else None
+    else:
+        result["chatflow_token"] = None
+    
+    return result
 
 
 async def update_whatsapp_account(

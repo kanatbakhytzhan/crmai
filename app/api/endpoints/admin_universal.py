@@ -1059,11 +1059,20 @@ async def tenant_snapshot(
         wa_phone = None
         wa_instance_id = None
         wa_token_masked = None
+        wa_token_present = False
+        wa_instance_present = False
+        wa_credentials_ok = False
         if wa_accounts:
             first_wa = wa_accounts[0]
             wa_phone = getattr(first_wa, "phone_number", None)
             wa_instance_id = getattr(first_wa, "chatflow_instance_id", None)
             wa_token_masked = getattr(first_wa, "chatflow_token_masked", None)
+            # Check if credentials are actually configured
+            raw_token = getattr(first_wa, "chatflow_token", None) or ""
+            raw_instance = getattr(first_wa, "chatflow_instance_id", None) or ""
+            wa_token_present = bool(raw_token.strip())
+            wa_instance_present = bool(raw_instance.strip())
+            wa_credentials_ok = wa_token_present and wa_instance_present
         
         # AI prompt details
         ai_prompt_raw = tenant_data.get("ai_prompt") or ""
@@ -1091,6 +1100,10 @@ async def tenant_snapshot(
                 "phone_number": wa_phone,
                 "chatflow_instance_id": wa_instance_id,
                 "chatflow_token_masked": wa_token_masked,
+                "chatflow_token_present": wa_token_present,
+                "chatflow_instance_present": wa_instance_present,
+                "chatflow_credentials_ok": wa_credentials_ok,
+                "chatflow_ready": wa_binding and wa_active and wa_credentials_ok,
             },
             "amocrm": {
                 "connected": amo_connected,

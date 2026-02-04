@@ -108,9 +108,10 @@ async def init_db():
                     print("[OK] SQLite: leads.phone_from_message uzhe est")
                 else:
                     print(f"[WARN] leads.phone_from_message SQLite: {type(e).__name__}: {e}")
+            # SQLite doesn't allow DEFAULT CURRENT_TIMESTAMP in ALTER TABLE
             try:
                 await conn.execute(text(
-                    "ALTER TABLE whatsapp_accounts ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+                    "ALTER TABLE whatsapp_accounts ADD COLUMN updated_at DATETIME"
                 ))
                 print("[OK] SQLite: kolonka whatsapp_accounts.updated_at dobavlena")
             except Exception as e:
@@ -118,6 +119,19 @@ async def init_db():
                     print("[OK] SQLite: whatsapp_accounts.updated_at uzhe est")
                 else:
                     print(f"[WARN] whatsapp_accounts.updated_at SQLite: {type(e).__name__}: {e}")
+            # SQLite: ChatFlow columns for whatsapp_accounts
+            for col, typ in [
+                ("chatflow_token", "VARCHAR(512)"),
+                ("chatflow_instance_id", "VARCHAR(255)"),
+            ]:
+                try:
+                    await conn.execute(text(f"ALTER TABLE whatsapp_accounts ADD COLUMN {col} {typ}"))
+                    print(f"[OK] SQLite: whatsapp_accounts.{col} dobavlena")
+                except Exception as e:
+                    if "duplicate column" in str(e).lower():
+                        print(f"[OK] SQLite: whatsapp_accounts.{col} uzhe est")
+                    else:
+                        print(f"[WARN] whatsapp_accounts.{col} SQLite: {type(e).__name__}: {e}")
             # SQLite: Universal Admin Console columns for tenants
             for col, typ in [
                 ("ai_prompt", "TEXT"),

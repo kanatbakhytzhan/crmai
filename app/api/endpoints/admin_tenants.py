@@ -614,3 +614,217 @@ async def delete_tenant_whatsapp(
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="WhatsApp account not found or tenant mismatch")
     return {"ok": True}
+
+
+# ========== WhatsApp Test Endpoint ==========
+
+from pydantic import BaseModel as PydanticBaseModel
+
+class WhatsAppTestBody(PydanticBaseModel):
+    """Body for POST /api/admin/tenants/{id}/whatsapp/test"""
+    to_phone: str
+    message: str = "Test message from BuildCRM"
+
+
+@router.post("/tenants/{tenant_id}/whatsapp/test", summary="Test WhatsApp send", tags=["WhatsApp"])
+async def test_whatsapp_send(
+    tenant_id: int,
+    body: WhatsAppTestBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_or_owner_or_rop),
+):
+    """
+    Отправить тестовое сообщение через WhatsApp для проверки интеграции.
+    
+    Использует whatsapp_source tenant:
+    - chatflow: отправляет через ChatFlow API с credentials из whatsapp_accounts
+    - amomarket: возвращает 501 (сообщения живут в amoCRM)
+    
+    Returns:
+        {ok: true, provider_response: {...}} при успехе
+        {ok: false, error: "...", error_type: "..."} при ошибке
+    """
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import text
+    
+    try:
+        # Check tenant exists
+        result = await db.execute(text("SELECT id, whatsapp_source FROM tenants WHERE id = :tid"), {"tid": tenant_id})
+        row = result.fetchone()
+        if not row:
+            return JSONResponse(status_code=404, content={"ok": False, "detail": "Tenant not found"})
+        
+        tenant_id_db, whatsapp_source = row
+        whatsapp_source = (whatsapp_source or "chatflow").strip()
+        
+        # Check whatsapp_source
+        if whatsapp_source == "amomarket":
+            return JSONResponse(
+                status_code=501,
+                content={
+                    "ok": False,
+                    "detail": "WhatsApp source is 'amomarket'. Messages are handled via AmoCRM, not direct send.",
+                    "error_type": "AMOMARKET_MODE"
+                }
+            )
+        
+        # Get ChatFlow credentials
+        acc = await crud.get_active_chatflow_account_for_tenant(db, tenant_id)
+        if not acc:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "detail": "No active WhatsApp account configured for this tenant",
+                    "error_type": "NO_WHATSAPP_ACCOUNT"
+                }
+            )
+        
+        token = getattr(acc, "chatflow_token", None)
+        instance_id = getattr(acc, "chatflow_instance_id", None)
+        
+        if not token or not instance_id:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "detail": "ChatFlow credentials (token/instance_id) not configured",
+                    "error_type": "CREDENTIALS_MISSING"
+                }
+            )
+        
+        # Normalize phone to JID
+        phone = (body.to_phone or "").strip()
+        if not phone:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "detail": "to_phone is required", "error_type": "VALIDATION_ERROR"}
+            )
+        
+        # Remove + and non-digits for JID
+        import re
+        phone_digits = re.sub(r'\D', '', phone)
+        if len(phone_digits) < 10:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "detail": "Invalid phone number", "error_type": "VALIDATION_ERROR"}
+            )
+        jid = f"{phone_digits}@s.whatsapp.net"
+        
+        # Send test message
+        from app.services import chatflow_client
+        result = await chatflow_client.send_text(
+            jid=jid,
+            msg=body.message,
+            token=token,
+            instance_id=instance_id,
+        )
+        
+        if result.ok:
+            return {
+                "ok": True,
+                "provider_response": result.provider_response,
+                "jid": jid,
+                "message_sent": body.message,
+            }
+        else:
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "ok": False,
+                    "error": result.error,
+                    "error_type": result.error_type,
+                    "status_code": result.status_code,
+                }
+            )
+            
+    except Exception as e:
+        import traceback
+        print(f"[ERROR] test_whatsapp_send failed: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "detail": f"Test failed: {type(e).__name__}",
+                "error_type": "EXCEPTION"
+            }
+        )
+
+
+@router.get("/tenants/{tenant_id}/whatsapp/health", summary="Check WhatsApp binding health", tags=["WhatsApp"])
+async def check_whatsapp_health(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_or_owner_or_rop),
+):
+    """
+    Проверить статус ChatFlow binding для tenant.
+    
+    Returns:
+        {
+            ok: true,
+            binding_exists: bool,
+            credentials_configured: bool,
+            health_check: {ok, error?, error_type?}
+        }
+    """
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import text
+    
+    try:
+        # Check tenant exists
+        result = await db.execute(text("SELECT id, whatsapp_source FROM tenants WHERE id = :tid"), {"tid": tenant_id})
+        row = result.fetchone()
+        if not row:
+            return JSONResponse(status_code=404, content={"ok": False, "detail": "Tenant not found"})
+        
+        whatsapp_source = (row[1] or "chatflow").strip()
+        
+        # Get ChatFlow account
+        acc = await crud.get_active_chatflow_account_for_tenant(db, tenant_id)
+        
+        if not acc:
+            return {
+                "ok": True,
+                "whatsapp_source": whatsapp_source,
+                "binding_exists": False,
+                "credentials_configured": False,
+                "is_active": False,
+                "health_check": {"ok": False, "error": "No WhatsApp account", "error_type": "NO_ACCOUNT"}
+            }
+        
+        token = getattr(acc, "chatflow_token", None)
+        instance_id = getattr(acc, "chatflow_instance_id", None)
+        phone = getattr(acc, "phone_number", None)
+        is_active = getattr(acc, "is_active", False)
+        
+        credentials_ok = bool(token and instance_id)
+        
+        # Perform health check
+        health_result = {"ok": False, "error": "Unknown", "error_type": "UNKNOWN"}
+        if credentials_ok:
+            from app.services import chatflow_client
+            health = await chatflow_client.health_check(token=token, instance_id=instance_id)
+            health_result = health.to_dict()
+        else:
+            health_result = {"ok": False, "error": "Credentials not configured", "error_type": "CREDENTIALS_MISSING"}
+        
+        return {
+            "ok": True,
+            "whatsapp_source": whatsapp_source,
+            "binding_exists": True,
+            "credentials_configured": credentials_ok,
+            "is_active": is_active,
+            "phone_number": phone,
+            "health_check": health_result,
+        }
+        
+    except Exception as e:
+        import traceback
+        print(f"[ERROR] check_whatsapp_health failed: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "detail": f"Health check failed: {type(e).__name__}"}
+        )

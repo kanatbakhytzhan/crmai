@@ -234,13 +234,84 @@ async def _transcribe_voice_and_get_text(data: dict[str, Any]) -> str | None:
         return None
 
 
-async def _send_reply_and_return_ok(jid: str, reply: str) -> None:
-    """Отправить ответ в ChatFlow, при ошибке только залогировать."""
+async def _send_reply_with_credentials(
+    db: AsyncSession,
+    jid: str,
+    reply: str,
+    tenant_id: int | None = None,
+    acc: Any = None,
+) -> dict:
+    """
+    Отправить ответ в ChatFlow используя credentials из whatsapp_accounts.
+    
+    Args:
+        db: Database session
+        jid: WhatsApp JID получателя
+        reply: Текст сообщения
+        tenant_id: ID tenant для поиска credentials (если acc не передан)
+        acc: WhatsAppAccount объект с credentials (приоритет над tenant_id)
+    
+    Returns:
+        dict с результатом отправки
+    """
+    # Get credentials from whatsapp_accounts
+    token = None
+    instance_id = None
+    
+    if acc:
+        token = getattr(acc, "chatflow_token", None)
+        instance_id = getattr(acc, "chatflow_instance_id", None)
+    elif tenant_id:
+        try:
+            acc = await crud.get_active_chatflow_account_for_tenant(db, tenant_id)
+            if acc:
+                token = getattr(acc, "chatflow_token", None)
+                instance_id = getattr(acc, "chatflow_instance_id", None)
+        except Exception as e:
+            log.warning("[CHATFLOW] Failed to get account for tenant %s: %s", tenant_id, type(e).__name__)
+    
+    # Log what we're using
+    token_masked = (token[:4] + "***" if token and len(token) > 4 else "***") if token else "(none)"
+    instance_masked = (instance_id[:8] + "..." if instance_id and len(instance_id) > 8 else instance_id) if instance_id else "(none)"
+    log.info("[CHATFLOW] SEND jid=...%s token=%s instance=%s", jid[-8:] if len(jid) > 8 else jid, token_masked, instance_masked)
+    
     try:
-        result = await chatflow_client.send_text(jid, reply)
-        log.info("[CHATFLOW] send-to-chatflow status=%s", result.get("status_code"))
+        result = await chatflow_client.send_text(jid, reply, token=token, instance_id=instance_id)
+        
+        if result.ok:
+            log.info("[CHATFLOW] send-to-chatflow OK status=%s", result.status_code)
+        else:
+            log.error("[CHATFLOW] send-to-chatflow FAILED: %s (type=%s)", result.error, result.error_type)
+        
+        return result.to_dict()
+        
     except Exception as e:
-        log.error("[CHATFLOW] send_text error: %s", type(e).__name__, exc_info=True)
+        log.error("[CHATFLOW] send_text exception: %s", type(e).__name__, exc_info=True)
+        return {
+            "ok": False,
+            "error": f"Exception: {type(e).__name__}",
+            "error_type": "EXCEPTION",
+        }
+
+
+async def _send_reply_and_return_ok(jid: str, reply: str, db: AsyncSession = None, tenant_id: int = None, acc: Any = None) -> None:
+    """
+    Отправить ответ в ChatFlow, при ошибке только залогировать.
+    
+    Backward compatible wrapper. Предпочтительно использовать _send_reply_with_credentials.
+    """
+    if db and (tenant_id or acc):
+        await _send_reply_with_credentials(db, jid, reply, tenant_id=tenant_id, acc=acc)
+    else:
+        # Legacy: use ENV credentials
+        try:
+            result = await chatflow_client.send_text(jid, reply)
+            if result.ok:
+                log.info("[CHATFLOW] send-to-chatflow status=%s", result.status_code)
+            else:
+                log.error("[CHATFLOW] send-to-chatflow failed: %s", result.error)
+        except Exception as e:
+            log.error("[CHATFLOW] send_text error: %s", type(e).__name__, exc_info=True)
 
 
 @router.get("/webhook")
@@ -273,6 +344,15 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
             log.info("[CHATFLOW] dedup hit msg_id=%s", msg_id)
             return {"ok": True, "dedup": True}
 
+    # Resolve tenant early for credentials (needed for all send operations)
+    tenant = await _resolve_tenant(db, data, resolved_tenant)
+    tenant_id = tenant.id if tenant else None
+    
+    # Get WhatsApp account with credentials for sending
+    acc = None
+    if tenant_id:
+        acc = await crud.get_active_chatflow_account_for_tenant(db, tenant_id)
+    
     # Извлечь user_text в зависимости от типа
     user_text: str | None = None
     if msg_type == "text":
@@ -284,30 +364,29 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
             log.info("[CHATFLOW] transcript length=%s", len(user_text))
         else:
             await _send_reply_and_return_ok(
-                remote_jid, "Не получилось распознать голосовое, напишите текстом."
+                remote_jid, "Не получилось распознать голосовое, напишите текстом.",
+                db=db, tenant_id=tenant_id, acc=acc
             )
             return {"ok": True}
     else:
         await _send_reply_and_return_ok(
-            remote_jid, "Пока понимаю только текст и голосовые."
+            remote_jid, "Пока понимаю только текст и голосовые.",
+            db=db, tenant_id=tenant_id, acc=acc
         )
         return {"ok": True}
 
     if not (user_text and user_text.strip()):
         return {"ok": True}
 
-    # A) Tenant только по привязке (resolved_tenant или instance_id в payload). Без fallback.
-    tenant = await _resolve_tenant(db, data, resolved_tenant)
+    # A) Tenant already resolved above; verify we have it
     if not tenant:
         log.warning("[AI] SKIP tenant not found for chatflow instance")
         return {"ok": True}
-    tenant_id = tenant.id
     log.info("[CHATFLOW] tenant_id=%s remote_jid=%s msg_id=%s", tenant_id, remote_jid, msg_id)
 
-    # A) WhatsApp attach активен и заполнены критичные поля (token OR instance_id)
-    acc = await crud.get_active_chatflow_account_for_tenant(db, tenant_id)
+    # A) WhatsApp attach already fetched above; verify we have it
     if not acc:
-        log.warning("[AI] SKIP whatsapp not attached/inactive")
+        log.warning("[AI] SKIP whatsapp not attached/inactive for tenant_id=%s", tenant_id)
         return {"ok": True}
 
     # Get or create conversation (channel=chatflow, external_id=remote_jid)
@@ -336,12 +415,12 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
     if _is_stop_command(text_norm):
         await crud.set_chat_ai_state(db, tenant_id, remote_jid, False)
         log.info("[AI] command stop jid=...%s tenant_id=%s", jid_safe, tenant_id)
-        await _send_reply_and_return_ok(remote_jid, "Ок ✅ AI в этом чате выключен. Чтобы включить обратно — /start")
+        await _send_reply_and_return_ok(remote_jid, "Ок ✅ AI в этом чате выключен. Чтобы включить обратно — /start", db=db, tenant_id=tenant_id, acc=acc)
         return {"ok": True}
     if _is_start_command(text_norm):
         await crud.set_chat_ai_state(db, tenant_id, remote_jid, True)
         log.info("[AI] chat resumed jid=...%s tenant_id=%s", jid_safe, tenant_id)
-        await _send_reply_and_return_ok(remote_jid, "Ок ✅ AI снова включён в этом чате.")
+        await _send_reply_and_return_ok(remote_jid, "Ок ✅ AI снова включён в этом чате.", db=db, tenant_id=tenant_id, acc=acc)
         return {"ok": True}
 
     # Остальные команды (stop all / start all) и обычные сообщения (tenant уже определён выше)
@@ -352,11 +431,11 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
     mute_cmd = _parse_mute_command(user_text or "")
     if mute_cmd == "stop_all" and tenant_id is not None:
         await crud.set_all_muted(db, channel_cf, phone_number_id_cf, True, tenant_id=tenant_id)
-        await _send_reply_and_return_ok(remote_jid, "Ок. Я отключил автоответ для всех чатов этого номера.")
+        await _send_reply_and_return_ok(remote_jid, "Ок. Я отключил автоответ для всех чатов этого номера.", db=db, tenant_id=tenant_id, acc=acc)
         return {"ok": True}
     if mute_cmd == "start_all" and tenant_id is not None:
         await crud.set_all_muted(db, channel_cf, phone_number_id_cf, False, tenant_id=tenant_id)
-        await _send_reply_and_return_ok(remote_jid, "Ок. Автоответ для всех чатов снова включён.")
+        await _send_reply_and_return_ok(remote_jid, "Ок. Автоответ для всех чатов снова включён.", db=db, tenant_id=tenant_id, acc=acc)
         return {"ok": True}
 
     # Сохранить входящее сообщение
@@ -411,7 +490,7 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
             await conversation_service.append_assistant_message(db, conv.id, reply_phone)
         except Exception as e:
             log.warning("[CHATFLOW] append_assistant_message: %s", type(e).__name__)
-        await _send_reply_and_return_ok(remote_jid, reply_phone)
+        await _send_reply_and_return_ok(remote_jid, reply_phone, db=db, tenant_id=tenant_id, acc=acc)
         return {"ok": True}
 
     # Обычное обновление номера в лиде (если в тексте есть номер, но не только номер)
@@ -553,7 +632,7 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
     except Exception as e:
         log.warning("[CHATFLOW] append_assistant_message error: %s", type(e).__name__)
 
-    await _send_reply_and_return_ok(remote_jid, reply)
+    await _send_reply_and_return_ok(remote_jid, reply, db=db, tenant_id=tenant_id, acc=acc)
     return {"ok": True}
 
 

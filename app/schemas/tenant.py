@@ -419,3 +419,19 @@ class AutoAssignRuleResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+# ========== Universal Admin Console: AmoCRM Pipelines ==========
+
+class AmoPrimaryPipelineUpdate(BaseModel):
+    """PUT /api/admin/tenants/{id}/amocrm/primary-pipeline"""
+    pipeline_id: str = Field(..., description="ID основной воронки в AmoCRM")
+
+class AmoPipelineMappingUpdate(BaseModel):
+    """PUT /api/admin/tenants/{id}/amocrm/pipeline-mapping"""
+    primary_pipeline_id: str = Field(..., description="ID основной воронки")
+    mapping: dict[str, str] = Field(..., description="Маппинг stage_key -> amo_stage_id")
+
+class AmoPipelineMappingResponse(BaseModel):
+    """GET /api/admin/tenants/{id}/amocrm/pipeline-mapping"""
+    primary_pipeline_id: Optional[str] = None
+    mapping: dict[str, str] = {}

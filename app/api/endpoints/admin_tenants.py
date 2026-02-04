@@ -20,8 +20,13 @@ from app.schemas.tenant import (
     WhatsAppAccountCreate,
     WhatsAppAccountResponse,
     WhatsAppAccountUpsert,
+    WhatsAppAccountResponse,
+    WhatsAppAccountUpsert,
     WhatsAppSaved,
 )
+import app.schemas.tenant as tenant_schemas
+from app.database import models
+from sqlalchemy import select
 
 router = APIRouter()
 
@@ -1240,7 +1245,7 @@ async def test_amocrm_sync(
     from app.services.amocrm_service import AmoCRMService
     from app.database import crud
     
-    tenant = await crud.get_tenant(db, tenant_id)
+    tenant = await crud.get_tenant_by_id(db, tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
 
@@ -1252,3 +1257,149 @@ async def test_amocrm_sync(
     })
     
     return result
+
+
+@router.get("/tenants/{tenant_id}/amocrm/pipelines", summary="Get AmoCRM pipelines", tags=["AmoCRM"])
+async def get_amocrm_pipelines(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_or_owner_or_rop),
+):
+    """
+    Get all pipelines and stages from AmoCRM.
+    """
+    from app.services.amocrm_service import AmoCRMService
+    service = AmoCRMService(db)
+    
+    # Check connection
+    account = await service.get_account_info(tenant_id)
+    if not account.get("connected"):
+        return {"ok": False, "error": "AmoCRM not connected"}
+
+    pipelines = await service.list_pipelines(tenant_id)
+    
+    formatted_pipelines = []
+    for p in pipelines:
+        statuses = []
+        raw_statuses = p.get("_embedded", {}).get("statuses", [])
+        for s in raw_statuses:
+            statuses.append({"id": s["id"], "name": s["name"], "color": s.get("color")})
+        formatted_pipelines.append({
+            "id": p["id"],
+            "name": p["name"],
+            "is_main": p.get("is_main", False),
+            "statuses": statuses
+        })
+    
+    return {"ok": True, "pipelines": formatted_pipelines}
+
+
+@router.put("/tenants/{tenant_id}/amocrm/primary-pipeline", summary="Set primary pipeline", tags=["AmoCRM"])
+async def set_amocrm_primary_pipeline(
+    tenant_id: int,
+    body: tenant_schemas.AmoPrimaryPipelineUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_or_owner_or_rop),
+):
+    """
+    Set default/primary pipeline for the tenant.
+    """
+    tenant = await crud.get_tenant_by_id(db, tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+        
+    tenant.default_pipeline_id = str(body.pipeline_id)
+    await db.commit()
+    await db.refresh(tenant)
+    
+    return {"ok": True, "primary_pipeline_id": tenant.default_pipeline_id}
+
+
+@router.get("/tenants/{tenant_id}/amocrm/pipeline-mapping", summary="Get pipeline mapping", tags=["AmoCRM"])
+async def get_amocrm_pipeline_mapping(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_or_owner_or_rop),
+):
+    """
+    Get current pipeline mapping configuration.
+    """
+    tenant = await crud.get_tenant_by_id(db, tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    # Fetch mappings
+    result = await db.execute(
+        select(models.TenantPipelineMapping).where(
+            models.TenantPipelineMapping.tenant_id == tenant_id,
+            models.TenantPipelineMapping.provider == "amocrm",
+            models.TenantPipelineMapping.is_active == True
+        )
+    )
+    rows = result.scalars().all()
+    
+    mapping_dict = {row.stage_key: row.stage_id for row in rows}
+    
+    return {
+        "ok": True,
+        "primary_pipeline_id": getattr(tenant, "default_pipeline_id", None),
+        "mapping": mapping_dict
+    }
+
+
+@router.put("/tenants/{tenant_id}/amocrm/pipeline-mapping", summary="Save pipeline mapping", tags=["AmoCRM"])
+async def save_amocrm_pipeline_mapping(
+    tenant_id: int,
+    body: tenant_schemas.AmoPipelineMappingUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_or_owner_or_rop),
+):
+    """
+    Save both primary pipeline and stage mappings.
+    """
+    tenant = await crud.get_tenant_by_id(db, tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    # 1. Update primary pipeline
+    tenant.default_pipeline_id = str(body.primary_pipeline_id)
+    
+    # 2. Update mappings
+    # We'll stick to a simple strategy: upsert.
+    # First, deactivate or delete old ones? Or just upsert.
+    # Let's check existing mapping to update or insert.
+    
+    # For simplicity, we can delete old mappings for this tenant/provider and insert new ones, 
+    # but that might lose history if we track it. 
+    # Let's iterate and merge.
+    
+    for stage_key, stage_id in body.mapping.items():
+        # Check if exists
+        q = select(models.TenantPipelineMapping).where(
+            models.TenantPipelineMapping.tenant_id == tenant_id,
+            models.TenantPipelineMapping.provider == "amocrm",
+            models.TenantPipelineMapping.stage_key == stage_key
+        )
+        res = await db.execute(q)
+        existing = res.scalars().first()
+        
+        if existing:
+            existing.stage_id = str(stage_id)
+            existing.pipeline_id = str(body.primary_pipeline_id)
+            existing.is_active = True
+        else:
+            new_mapping = models.TenantPipelineMapping(
+                tenant_id=tenant_id,
+                provider="amocrm",
+                pipeline_id=str(body.primary_pipeline_id),
+                stage_key=stage_key,
+                stage_id=str(stage_id),
+                is_active=True
+            )
+            db.add(new_mapping)
+            
+    await db.commit()
+    await db.refresh(tenant)
+    
+    return {"ok": True, "detail": "Mappings saved"}
+

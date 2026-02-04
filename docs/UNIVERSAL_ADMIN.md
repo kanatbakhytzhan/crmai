@@ -78,7 +78,63 @@ POST /api/admin/tenants/{id}/amocrm/disconnect
 
 ---
 
+
+---
+
+## Настройка воронок (Pipelines)
+
+### GET /api/admin/tenants/{id}/amocrm/pipelines
+
+Возвращает список всех воронок и стадий из AmoCRM. Поле `is_main` указывает на воронку, помеченную главной в AmoCRM, но мы можем выбрать свою "основную" для создания сделок.
+
+Ответ:
+```json
+{
+  "ok": true,
+  "pipelines": [
+    {
+      "id": 1234,
+      "name": "Продажи",
+      "statuses": [
+        {"id": 142, "name": "Первичный контакт", "color": "#fffeb2"},
+        {"id": 143, "name": "Переговоры", "color": "#fffeb2"}
+      ]
+    }
+  ]
+}
+```
+
+### PUT /api/admin/tenants/{id}/amocrm/primary-pipeline
+
+Установить id воронки, в которой будут создаваться новые сделки по умолчанию.
+
+Body:
+```json
+{
+  "pipeline_id": "1234"
+}
+```
+
+### GET /api/admin/tenants/{id}/amocrm/pipeline-mapping
+
+Возвращает текущую настройку (основной пайплайн + маппинг стадий).
+
+Ответ:
+```json
+{
+  "ok": true,
+  "primary_pipeline_id": "1234",
+  "mapping": {
+    "unprocessed": "142",
+    "won": "143"
+  }
+}
+```
+
+---
+
 ## Маппинг стадий (Pipeline Mappings)
+
 
 Связывает наши `stage_key` со стадиями воронки в amoCRM.
 

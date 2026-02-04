@@ -143,15 +143,52 @@ async def list_tenants(
         return {"tenants": [_tenant_response(t, base_url) for t in tenants], "total": len(tenants)}
     except Exception as e:
         error_name = type(e).__name__
+        error_str = str(e)
         print(f"[ERROR] list_tenants ORM failed: {error_name}: {e}")
         
-        # Fallback: use raw SQL with only core columns (works even if new columns don't exist)
-        if "ProgrammingError" in error_name or "OperationalError" in error_name or "UndefinedColumn" in str(e):
-            print("[INFO] Falling back to raw SQL query for tenants")
+        # Rollback the failed transaction before trying again
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        
+        # Fallback: use raw SQL with minimal core columns
+        print("[INFO] Falling back to raw SQL query for tenants")
+        try:
+            # Try with most columns first
+            result = await db.execute(text(
+                "SELECT id, name, slug, is_active, default_owner_user_id, ai_enabled, ai_prompt, webhook_key, created_at FROM tenants ORDER BY id"
+            ))
+            rows = result.fetchall()
+            tenants_list = []
+            for row in rows:
+                wk = row[7]
+                t = {
+                    "id": row[0],
+                    "name": row[1],
+                    "slug": row[2],
+                    "is_active": row[3],
+                    "default_owner_user_id": row[4],
+                    "ai_enabled": row[5] if row[5] is not None else True,
+                    "ai_prompt": row[6],
+                    "webhook_key": wk,
+                    "created_at": row[8].isoformat() if row[8] else None,
+                    "whatsapp_source": "chatflow",
+                    "ai_enabled_global": True,
+                    "ai_after_lead_submitted_behavior": "polite_close",
+                    "webhook_url": f"{base_url}/api/chatflow/webhook?key={wk}" if wk and base_url else None,
+                }
+                tenants_list.append(t)
+            return {"tenants": tenants_list, "total": len(tenants_list)}
+        except Exception as e2:
+            print(f"[WARN] First raw SQL failed: {e2}, trying minimal columns")
             try:
-                result = await db.execute(text(
-                    "SELECT id, name, slug, is_active, default_owner_user_id, ai_enabled, ai_prompt, webhook_key, created_at FROM tenants ORDER BY id"
-                ))
+                await db.rollback()
+            except Exception:
+                pass
+            # Ultimate fallback: absolute minimum columns
+            try:
+                result = await db.execute(text("SELECT id, name, slug, is_active, created_at FROM tenants ORDER BY id"))
                 rows = result.fetchall()
                 tenants_list = []
                 for row in rows:
@@ -160,25 +197,22 @@ async def list_tenants(
                         "name": row[1],
                         "slug": row[2],
                         "is_active": row[3],
-                        "default_owner_user_id": row[4],
-                        "ai_enabled": row[5] if row[5] is not None else True,
-                        "ai_prompt": row[6],
-                        "webhook_key": row[7],
-                        "created_at": row[8].isoformat() if row[8] else None,
+                        "default_owner_user_id": None,
+                        "ai_enabled": True,
+                        "ai_prompt": None,
+                        "webhook_key": None,
+                        "created_at": row[4].isoformat() if row[4] else None,
                         "whatsapp_source": "chatflow",
                         "ai_enabled_global": True,
                         "ai_after_lead_submitted_behavior": "polite_close",
-                        "webhook_url": f"{base_url}/api/chatflow/webhook?key={row[7]}" if row[7] and base_url else None,
+                        "webhook_url": None,
                     }
                     tenants_list.append(t)
                 return {"tenants": tenants_list, "total": len(tenants_list)}
-            except Exception as e2:
-                print(f"[ERROR] list_tenants raw SQL also failed: {e2}")
+            except Exception as e3:
+                print(f"[ERROR] list_tenants all SQL failed: {e3}")
                 traceback.print_exc()
-                raise HTTPException(status_code=500, detail=f"Database error: {type(e2).__name__}")
-        
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Internal error: {error_name}")
+                raise HTTPException(status_code=500, detail=f"Database error: {str(e3)[:150]}")
 
 
 async def _require_tenant_admin_or_owner_rop(db: AsyncSession, tenant_id: int, current_user: User) -> str | None:

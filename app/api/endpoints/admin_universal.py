@@ -127,6 +127,61 @@ async def _build_tenant_settings_response(db: AsyncSession, tenant_id: int, tena
     )
 
 
+async def _get_tenant_with_fallback(db: AsyncSession, tenant_id: int) -> dict | None:
+    """Get tenant data with raw SQL fallback if ORM fails due to missing columns."""
+    from sqlalchemy import text
+    
+    # First try ORM
+    try:
+        tenant = await crud.get_tenant_by_id(db, tenant_id)
+        if tenant:
+            return {
+                "id": tenant.id,
+                "name": tenant.name,
+                "slug": tenant.slug,
+                "is_active": tenant.is_active,
+                "ai_prompt": getattr(tenant, "ai_prompt", None) or "",
+                "ai_enabled": getattr(tenant, "ai_enabled", True),
+                "whatsapp_source": getattr(tenant, "whatsapp_source", "chatflow") or "chatflow",
+                "ai_enabled_global": getattr(tenant, "ai_enabled_global", True),
+                "ai_after_lead_submitted_behavior": getattr(tenant, "ai_after_lead_submitted_behavior", "polite_close") or "polite_close",
+                "amocrm_base_domain": getattr(tenant, "amocrm_base_domain", None),
+            }
+        return None
+    except Exception as e:
+        error_str = str(e)
+        if "OperationalError" in type(e).__name__ or "no such column" in error_str:
+            print(f"[WARN] ORM failed for tenant {tenant_id}, falling back to raw SQL: {e}")
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+        else:
+            raise
+    
+    # Fallback to raw SQL with minimal columns
+    try:
+        result = await db.execute(text("SELECT id, name, slug, is_active, created_at FROM tenants WHERE id = :tid"), {"tid": tenant_id})
+        row = result.fetchone()
+        if row:
+            return {
+                "id": row[0],
+                "name": row[1],
+                "slug": row[2],
+                "is_active": row[3],
+                "ai_prompt": "",
+                "ai_enabled": True,
+                "whatsapp_source": "chatflow",
+                "ai_enabled_global": True,
+                "ai_after_lead_submitted_behavior": "polite_close",
+                "amocrm_base_domain": None,
+            }
+    except Exception as e2:
+        print(f"[ERROR] Raw SQL also failed for tenant {tenant_id}: {e2}")
+    
+    return None
+
+
 @router.get("/tenants/{tenant_id}/settings", summary="Настройки tenant для Universal Admin")
 async def get_tenant_settings(
     tenant_id: int,
@@ -146,14 +201,23 @@ async def get_tenant_settings(
         return _safe_json_error("Access check failed", 403)
     
     try:
-        tenant = await crud.get_tenant_by_id(db, tenant_id)
-        if not tenant:
+        tenant_data = await _get_tenant_with_fallback(db, tenant_id)
+        if not tenant_data:
             return JSONResponse(
                 status_code=404,
                 content={"ok": False, "detail": f"Tenant {tenant_id} not found"}
             )
         
-        print(f"[INFO] get_tenant_settings: tenant_id={tenant_id}, name={tenant.name}")
+        # Build response using tenant_data dict
+        print(f"[INFO] get_tenant_settings: tenant_id={tenant_id}, name={tenant_data.get('name')}")
+        
+        # Create a simple object-like wrapper for tenant_data
+        class TenantWrapper:
+            def __init__(self, data):
+                for k, v in data.items():
+                    setattr(self, k, v)
+        
+        tenant = TenantWrapper(tenant_data)
         response = await _build_tenant_settings_response(db, tenant_id, tenant)
         return response
         
@@ -554,50 +618,68 @@ async def tenant_snapshot(
     """
     Диагностика: настройки tenant, привязка WhatsApp, amoCRM, количество маппингов.
     """
-    tenant = await crud.get_tenant_by_id(db, tenant_id)
-    if not tenant:
-        raise HTTPException(status_code=404, detail="Tenant not found")
-    
-    # WhatsApp accounts
-    wa_accounts = await crud.list_whatsapp_accounts_by_tenant(db, tenant_id)
-    wa_binding = bool(wa_accounts)
-    wa_active = any(a.is_active for a in wa_accounts)
-    
-    # AmoCRM
-    amo_integration = await crud.get_tenant_integration(db, tenant_id, "amocrm")
-    amo_connected = bool(amo_integration and amo_integration.is_active and amo_integration.access_token)
-    
-    # Mappings count
-    pipeline_mappings = await crud.list_pipeline_mappings(db, tenant_id, "amocrm")
-    field_mappings = await crud.list_field_mappings(db, tenant_id, "amocrm")
-    
-    return {
-        "ok": True,
-        "tenant_id": tenant_id,
-        "tenant_name": tenant.name,
-        "settings": {
-            "whatsapp_source": getattr(tenant, "whatsapp_source", "chatflow"),
-            "ai_enabled_global": getattr(tenant, "ai_enabled_global", True),
-            "ai_enabled": getattr(tenant, "ai_enabled", True),
-            "ai_prompt_len": len(tenant.ai_prompt or ""),
-            "ai_after_lead_submitted_behavior": getattr(tenant, "ai_after_lead_submitted_behavior", "polite_close"),
-        },
-        "whatsapp": {
-            "binding_exists": wa_binding,
-            "is_active": wa_active,
-            "accounts_count": len(wa_accounts),
-        },
-        "amocrm": {
-            "connected": amo_connected,
-            "is_active": amo_integration.is_active if amo_integration else False,
-            "base_domain": amo_integration.base_domain if amo_integration else None,
-            "token_expires_at": amo_integration.token_expires_at.isoformat() if amo_integration and amo_integration.token_expires_at else None,
-        },
-        "mappings": {
-            "pipeline_count": len(pipeline_mappings),
-            "field_count": len(field_mappings),
-        },
-    }
+    try:
+        tenant_data = await _get_tenant_with_fallback(db, tenant_id)
+        if not tenant_data:
+            return JSONResponse(status_code=404, content={"ok": False, "detail": "Tenant not found"})
+        
+        # WhatsApp accounts
+        try:
+            wa_accounts = await crud.list_whatsapp_accounts_by_tenant(db, tenant_id)
+            wa_binding = bool(wa_accounts)
+            wa_active = any(a.is_active for a in wa_accounts) if wa_accounts else False
+        except Exception:
+            wa_accounts = []
+            wa_binding = False
+            wa_active = False
+        
+        # AmoCRM
+        try:
+            amo_integration = await crud.get_tenant_integration(db, tenant_id, "amocrm")
+            amo_connected = bool(amo_integration and amo_integration.is_active and amo_integration.access_token)
+        except Exception:
+            amo_integration = None
+            amo_connected = False
+        
+        # Mappings count
+        try:
+            pipeline_mappings = await crud.list_pipeline_mappings(db, tenant_id, "amocrm")
+            field_mappings = await crud.list_field_mappings(db, tenant_id, "amocrm")
+        except Exception:
+            pipeline_mappings = []
+            field_mappings = []
+        
+        return {
+            "ok": True,
+            "tenant_id": tenant_id,
+            "tenant_name": tenant_data.get("name", ""),
+            "settings": {
+                "whatsapp_source": tenant_data.get("whatsapp_source", "chatflow"),
+                "ai_enabled_global": tenant_data.get("ai_enabled_global", True),
+                "ai_enabled": tenant_data.get("ai_enabled", True),
+                "ai_prompt_len": len(tenant_data.get("ai_prompt") or ""),
+                "ai_after_lead_submitted_behavior": tenant_data.get("ai_after_lead_submitted_behavior", "polite_close"),
+            },
+            "whatsapp": {
+                "binding_exists": wa_binding,
+                "is_active": wa_active,
+                "accounts_count": len(wa_accounts) if wa_accounts else 0,
+            },
+            "amocrm": {
+                "connected": amo_connected,
+                "is_active": amo_integration.is_active if amo_integration else False,
+                "base_domain": amo_integration.base_domain if amo_integration else None,
+                "token_expires_at": amo_integration.token_expires_at.isoformat() if amo_integration and amo_integration.token_expires_at else None,
+            },
+            "mappings": {
+                "pipeline_count": len(pipeline_mappings) if pipeline_mappings else 0,
+                "field_count": len(field_mappings) if field_mappings else 0,
+            },
+        }
+    except Exception as e:
+        print(f"[ERROR] tenant_snapshot failed for tenant {tenant_id}: {e}")
+        traceback.print_exc()
+        return _safe_json_error(f"Failed to get snapshot: {type(e).__name__}")
 
 
 # ========== Self-Check Endpoint ==========

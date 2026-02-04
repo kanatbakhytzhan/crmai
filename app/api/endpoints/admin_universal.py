@@ -44,13 +44,81 @@ def _safe_json_error(detail: str, status_code: int = 500) -> JSONResponse:
 
 
 async def _require_tenant_access(db: AsyncSession, tenant_id: int, current_user: User) -> str:
-    """Проверка доступа: admin или owner/rop в tenant. Возвращает роль."""
+    """
+    Проверка доступа к настройкам tenant. Возвращает роль.
+    
+    Access rules:
+    - admin (is_admin=True) -> allow for ANY tenant
+    - owner (default_owner_user_id or role=owner in tenant_users) -> allow
+    - rop (role=rop in tenant_users) -> allow ONLY for their tenant
+    - manager -> forbidden
+    """
+    from sqlalchemy import text
+    
+    user_id = current_user.id
+    user_email = getattr(current_user, "email", "unknown")
+    
+    # 1) Admin can access any tenant
     if getattr(current_user, "is_admin", False):
+        print(f"[ACCESS] admin user_id={user_id} allowed for tenant_id={tenant_id}")
         return "admin"
-    role = await crud.get_tenant_user_role(db, tenant_id, current_user.id)
-    if role in ("owner", "rop"):
-        return role
-    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin or tenant owner/rop required")
+    
+    # 2) Check tenant-specific role with fallback for DB issues
+    role = None
+    try:
+        role = await crud.get_tenant_user_role(db, tenant_id, user_id)
+    except Exception as e:
+        error_str = str(e)
+        print(f"[WARN] get_tenant_user_role failed for tenant {tenant_id}, user {user_id}: {type(e).__name__}: {e}")
+        
+        # Fallback: check tenant_users table directly with raw SQL
+        if "OperationalError" in type(e).__name__ or "no such column" in error_str:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            try:
+                # Check if user is default_owner using raw SQL
+                result = await db.execute(text(
+                    "SELECT default_owner_user_id FROM tenants WHERE id = :tid"
+                ), {"tid": tenant_id})
+                row = result.fetchone()
+                if row and row[0] == user_id:
+                    print(f"[ACCESS] fallback: user_id={user_id} is default_owner for tenant_id={tenant_id}")
+                    return "owner"
+                
+                # Check tenant_users table
+                result = await db.execute(text(
+                    "SELECT role FROM tenant_users WHERE tenant_id = :tid AND user_id = :uid"
+                ), {"tid": tenant_id, "uid": user_id})
+                row = result.fetchone()
+                if row:
+                    role = (row[0] or "").strip().lower()
+                    if role == "member":
+                        role = "manager"
+            except Exception as e2:
+                print(f"[ERROR] Fallback raw SQL also failed: {e2}")
+    
+    # 3) Check role permissions
+    if role == "owner":
+        print(f"[ACCESS] owner user_id={user_id} allowed for tenant_id={tenant_id}")
+        return "owner"
+    
+    if role == "rop":
+        print(f"[ACCESS] rop user_id={user_id} allowed for tenant_id={tenant_id}")
+        return "rop"
+    
+    if role == "manager":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Forbidden: role=manager cannot access tenant settings. Contact your admin."
+        )
+    
+    # No role found
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=f"Forbidden: user {user_email} has no access to tenant {tenant_id}. Required: admin, owner, or rop role."
+    )
 
 
 # ========== Tenant Settings ==========
@@ -193,12 +261,14 @@ async def get_tenant_settings(
     ALWAYS returns complete structure with ok:true/false.
     """
     try:
-        await _require_tenant_access(db, tenant_id, current_user)
+        user_role = await _require_tenant_access(db, tenant_id, current_user)
+        print(f"[INFO] get_tenant_settings: user_role={user_role}, tenant_id={tenant_id}")
     except HTTPException as e:
         return _safe_json_error(e.detail, e.status_code)
     except Exception as e:
-        print(f"[ERROR] get_tenant_settings access check failed: {e}")
-        return _safe_json_error("Access check failed", 403)
+        print(f"[ERROR] get_tenant_settings access check failed: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return _safe_json_error(f"Access check failed: {type(e).__name__}", 403)
     
     try:
         tenant_data = await _get_tenant_with_fallback(db, tenant_id)
@@ -239,11 +309,13 @@ async def update_tenant_settings(
     Поддерживает: whatsapp_source, ai_enabled_global, ai_prompt, ai_after_lead_submitted_behavior, amocrm_base_domain.
     """
     try:
-        await _require_tenant_access(db, tenant_id, current_user)
+        user_role = await _require_tenant_access(db, tenant_id, current_user)
+        print(f"[INFO] update_tenant_settings: user_role={user_role}, tenant_id={tenant_id}")
     except HTTPException as e:
         return _safe_json_error(e.detail, e.status_code)
     except Exception as e:
-        return _safe_json_error("Access check failed", 403)
+        print(f"[ERROR] update_tenant_settings access check failed: {type(e).__name__}: {e}")
+        return _safe_json_error(f"Access check failed: {type(e).__name__}", 403)
     
     try:
         tenant = await crud.update_tenant(

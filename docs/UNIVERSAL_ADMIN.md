@@ -224,6 +224,40 @@ AMO_REDIRECT_URL=https://your-api.com/api/integrations/amocrm/callback
 
 ---
 
+## Access Rules (Права доступа)
+
+Для всех endpoints `/api/admin/tenants/{id}/*` действуют следующие правила:
+
+| Роль | Доступ |
+|------|--------|
+| **admin** (`is_admin=True`) | ✅ Полный доступ ко **всем** tenants |
+| **owner** (default_owner_user_id или role=owner в tenant_users) | ✅ Полный доступ к своему tenant |
+| **rop** (role=rop в tenant_users) | ✅ Доступ только к своему tenant |
+| **manager** (role=manager в tenant_users) | ❌ Нет доступа к настройкам tenant |
+| **Без роли** | ❌ 403 Forbidden |
+
+### Ошибки доступа (403)
+
+При отказе в доступе возвращается JSON с конкретной причиной:
+
+```json
+{
+  "ok": false,
+  "detail": "Forbidden: role=manager cannot access tenant settings. Contact your admin."
+}
+```
+
+Или:
+
+```json
+{
+  "ok": false,
+  "detail": "Forbidden: user user@example.com has no access to tenant 2. Required: admin, owner, or rop role."
+}
+```
+
+---
+
 ## Безопасность
 
 - Токены amoCRM **не логируются** (только первые 4 символа при необходимости)

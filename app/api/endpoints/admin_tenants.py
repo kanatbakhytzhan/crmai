@@ -456,40 +456,66 @@ async def upsert_whatsapp(
 ):
     """
     Сохранить/обновить привязку WhatsApp/ChatFlow для tenant (одна запись на tenant).
-    Если запись уже есть — обновить; если нет — создать.
-    При active=true обязательны chatflow_token и chatflow_instance_id (иначе бот не отвечает).
+    
+    MERGE SEMANTICS:
+    - If chatflow_token is provided and non-empty: update token
+    - If chatflow_token is "" or not provided: KEEP existing token (don't wipe)
+    - Same for chatflow_instance_id
+    - phone_number: updated if provided
+    - is_active: always updated
+    
+    При active=true обязательны chatflow_token и chatflow_instance_id (проверяется с учётом существующих).
     """
     import traceback
     from fastapi.responses import JSONResponse
     from sqlalchemy import text
     
     try:
-        # Check tenant exists using raw SQL to avoid column errors
+        # Check tenant exists
         result = await db.execute(text("SELECT id FROM tenants WHERE id = :tid"), {"tid": tenant_id})
         if not result.fetchone():
             return JSONResponse(status_code=404, content={"ok": False, "detail": "Tenant not found"})
         
+        # Get existing account to check current values
+        existing = await crud.get_active_chatflow_account_for_tenant(db, tenant_id)
+        existing_token = getattr(existing, "chatflow_token", None) or "" if existing else ""
+        existing_instance = getattr(existing, "chatflow_instance_id", None) or "" if existing else ""
+        
+        # Determine what to save (merge semantics)
+        # If body has non-empty value, use it; otherwise keep existing
+        new_token = (body.chatflow_token or "").strip() if body.chatflow_token else None
+        new_instance = (body.chatflow_instance_id or "").strip() if body.chatflow_instance_id else None
+        
+        # For validation: check what the final values will be
+        final_token = new_token if new_token else existing_token
+        final_instance = new_instance if new_instance else existing_instance
+        
         if body.is_active:
-            token_ok = (body.chatflow_token or "").strip()
-            instance_ok = (body.chatflow_instance_id or "").strip()
-            if not token_ok or not instance_ok:
+            if not final_token or not final_instance:
                 return JSONResponse(
                     status_code=400,
-                    content={"ok": False, "detail": "When active=true, chatflow_token and chatflow_instance_id are required"},
+                    content={"ok": False, "detail": "When active=true, chatflow_token and chatflow_instance_id are required (either new or existing)"},
                 )
-        phone_number = (body.phone_number or "").strip() or "—"
-        instance_id = (body.chatflow_instance_id or "").strip() or None
-        token = (body.chatflow_token or "").strip() or None
-        print(f"[ADMIN] whatsapp upsert tenant_id={tenant_id} active={body.is_active} phone_number={phone_number} token_len={len(body.chatflow_token or '')} instance_len={len(body.chatflow_instance_id or '')}")
+        
+        phone_number = (body.phone_number or "").strip() or None
+        token_len = len(new_token or "")
+        
+        print(f"[ADMIN PUT] whatsapp upsert tenant_id={tenant_id} user_id={current_user.id} active={body.is_active} phone={phone_number} token_len={token_len} instance={new_instance or '(keep existing)'}")
+        
         acc = await crud.upsert_whatsapp_for_tenant(
             db,
             tenant_id=tenant_id,
-            phone_number=phone_number,
-            chatflow_token=token,
-            chatflow_instance_id=instance_id,
+            phone_number=phone_number,  # None = keep existing
+            chatflow_token=new_token,   # None = keep existing
+            chatflow_instance_id=new_instance,  # None = keep existing
             is_active=body.is_active,
         )
-        print(f"[ADMIN] whatsapp upsert saved id={acc.id}")
+        
+        # Verify what was saved (read-after-write)
+        await db.refresh(acc)
+        saved_token_len = len(getattr(acc, "chatflow_token", None) or "")
+        print(f"[ADMIN PUT] whatsapp saved id={acc.id} token_len={saved_token_len} instance={acc.chatflow_instance_id}")
+        
         return WhatsAppAccountResponse.model_validate(acc)
     except Exception as e:
         print(f"[ERROR] upsert_whatsapp failed: {type(e).__name__}: {e}")
@@ -518,13 +544,18 @@ async def attach_whatsapp(
 ):
     """
     Привязать/обновить WhatsApp (UPSERT): одна запись на tenant.
-    Принимает token или chatflow_token, instance_id или chatflow_instance_id, active или is_active.
-    При active=true обязательны chatflow_token и chatflow_instance_id (422 при отсутствии).
-    При active=false можно без token/instance_id (существующие не затираются).
+    
+    MERGE SEMANTICS:
+    - If chatflow_token is provided and non-empty: update token
+    - If chatflow_token is "" or not provided: KEEP existing token (don't wipe)
+    - Same for chatflow_instance_id
+    
+    При active=true требуется token+instance_id (либо новые, либо существующие).
     Ответ: { ok: true, whatsapp: { id, tenant_id, phone_number, active, chatflow_instance_id, chatflow_token } }.
     """
     import traceback
     from fastapi.responses import JSONResponse
+    from sqlalchemy import text
     
     try:
         try:
@@ -537,38 +568,63 @@ async def attach_whatsapp(
         except Exception as e:
             return JSONResponse(status_code=422, content={"ok": False, "detail": str(e)})
 
-        # Check tenant exists using raw SQL to avoid column errors
-        from sqlalchemy import text
+        # Check tenant exists
         result = await db.execute(text("SELECT id FROM tenants WHERE id = :tid"), {"tid": tenant_id})
         if not result.fetchone():
             return JSONResponse(status_code=404, content={"ok": False, "detail": "Tenant not found"})
         
+        # Get existing account to check current values (for merge semantics)
+        existing = await crud.get_active_chatflow_account_for_tenant(db, tenant_id)
+        existing_token = getattr(existing, "chatflow_token", None) or "" if existing else ""
+        existing_instance = getattr(existing, "chatflow_instance_id", None) or "" if existing else ""
+        
+        # Determine what fields were actually provided in request
+        # If key is in body_raw with non-empty value: use new value
+        # If key is not in body_raw OR value is empty: keep existing
+        new_token = None
+        new_instance = None
+        
+        if "chatflow_token" in body_raw or "token" in body_raw:
+            val = body_raw.get("chatflow_token") or body_raw.get("token") or ""
+            if val.strip():
+                new_token = val.strip()
+        
+        if "chatflow_instance_id" in body_raw or "instance_id" in body_raw:
+            val = body_raw.get("chatflow_instance_id") or body_raw.get("instance_id") or ""
+            if val.strip():
+                new_instance = val.strip()
+        
+        # For validation: check what the final values will be
+        final_token = new_token if new_token else existing_token
+        final_instance = new_instance if new_instance else existing_instance
+        
         if body.is_active:
-            token_ok = (body.chatflow_token or "").strip()
-            instance_ok = (body.chatflow_instance_id or "").strip()
-            if not token_ok or not instance_ok:
+            if not final_token or not final_instance:
                 return JSONResponse(
                     status_code=422,
-                    content={"ok": False, "detail": "When active=true, chatflow_token and chatflow_instance_id are required"}
+                    content={"ok": False, "detail": "When active=true, chatflow_token and chatflow_instance_id are required (either new or existing)"}
                 )
-        token = (body.chatflow_token or "").strip() or None
-        instance_id = (body.chatflow_instance_id or "").strip() or None
-        phone_number = (body.phone_number or "").strip() or "—"
-        token_len = len(body.chatflow_token or "")
-        instance_len = len(body.chatflow_instance_id or "")
-        print(
-            f"[ADMIN] whatsapp attach tenant_id={tenant_id} active={body.is_active} phone_number={phone_number} token_len={token_len} instance_len={instance_len} json_keys={body_raw_keys}",
-        )
+        
+        phone_number = (body.phone_number or "").strip() or None
+        token_len = len(new_token or "")
+        
+        print(f"[ADMIN POST] whatsapp attach tenant_id={tenant_id} user_id={current_user.id} active={body.is_active} phone={phone_number} token_len={token_len} instance={new_instance or '(keep existing)'} json_keys={body_raw_keys}")
+        
         acc = await crud.upsert_whatsapp_for_tenant(
             db,
             tenant_id=tenant_id,
-            phone_number=phone_number,
+            phone_number=phone_number,  # None = keep existing
             phone_number_id=body.phone_number_id,
-            chatflow_token=token,
-            chatflow_instance_id=instance_id,
+            chatflow_token=new_token,   # None = keep existing
+            chatflow_instance_id=new_instance,  # None = keep existing
             is_active=body.is_active,
         )
-        print(f"[ADMIN] whatsapp attach saved id={acc.id}")
+        
+        # Verify saved values (read-after-write)
+        await db.refresh(acc)
+        saved_token_len = len(getattr(acc, "chatflow_token", None) or "")
+        print(f"[ADMIN POST] whatsapp saved id={acc.id} token_len={saved_token_len} instance={acc.chatflow_instance_id}")
+        
         return {"ok": True, "whatsapp": _whatsapp_to_saved(acc)}
     except Exception as e:
         print(f"[ERROR] attach_whatsapp failed: {type(e).__name__}: {e}")

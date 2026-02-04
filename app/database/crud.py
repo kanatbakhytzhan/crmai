@@ -1684,32 +1684,42 @@ async def upsert_whatsapp_for_tenant(
     db: AsyncSession,
     tenant_id: int,
     *,
-    phone_number: str = "",
+    phone_number: Optional[str] = None,
     phone_number_id: Optional[str] = None,
     chatflow_token: Optional[str] = None,
     chatflow_instance_id: Optional[str] = None,
     is_active: bool = True,
 ) -> WhatsAppAccount:
-    """Если у tenant есть whatsapp_account — обновить (первый по id), иначе создать. Одна запись на tenant.
-    Передавать None для token/instance_id = не менять при обновлении (не затирать существующие)."""
+    """
+    Если у tenant есть whatsapp_account — обновить (первый по id), иначе создать. Одна запись на tenant.
+    
+    MERGE SEMANTICS:
+    - None for phone_number/token/instance_id = don't update (preserve existing)
+    - Non-None values (including "") will update the field
+    - Empty string ("") for phone_number defaults to "—" only on CREATE, not on UPDATE
+    """
     accounts = await list_whatsapp_accounts_by_tenant(db, tenant_id)
-    phone = (phone_number or "").strip() or "—"
+    
     if accounts:
+        # UPDATE existing - pass values as-is (None = don't change)
         acc = await update_whatsapp_account(
             db,
             accounts[0].id,
             tenant_id,
-            phone_number=phone,
+            phone_number=phone_number,  # None = keep existing
             phone_number_id=phone_number_id,
             chatflow_token=chatflow_token,
             chatflow_instance_id=chatflow_instance_id,
             is_active=is_active,
         )
         return acc or accounts[0]
+    
+    # CREATE new - provide defaults for required fields
+    phone = (phone_number or "").strip() or "—"
     return await create_whatsapp_account(
         db,
         tenant_id=tenant_id,
-        phone_number=phone,
+        phone_number=phone,  # Default to "—" only on create
         phone_number_id=phone_number_id,
         chatflow_token=chatflow_token,
         chatflow_instance_id=chatflow_instance_id,

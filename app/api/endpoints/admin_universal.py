@@ -264,6 +264,76 @@ async def _build_tenant_settings_response(
     )
 
 
+class _TenantWrapper:
+    """Simple wrapper to convert dict to object-like access for tenant data."""
+    def __init__(self, data: dict):
+        for k, v in data.items():
+            setattr(self, k, v)
+
+
+async def _get_tenant_with_fallback_fresh(db: AsyncSession, tenant_id: int) -> dict | None:
+    """
+    Get tenant data using RAW SQL only - bypasses ORM cache for read-after-write consistency.
+    
+    This function ALWAYS uses raw SQL to ensure we get fresh data from DB,
+    not cached data from the ORM session.
+    """
+    from sqlalchemy import text
+    
+    # Try full column set first (raw SQL - no ORM cache)
+    try:
+        sql = """
+            SELECT id, name, slug, is_active, 
+                   ai_prompt, ai_enabled, whatsapp_source, ai_enabled_global,
+                   ai_after_lead_submitted_behavior, amocrm_base_domain
+            FROM tenants WHERE id = :tid
+        """
+        result = await db.execute(text(sql), {"tid": tenant_id})
+        row = result.fetchone()
+        if row:
+            return {
+                "id": row[0],
+                "name": row[1],
+                "slug": row[2],
+                "is_active": row[3],
+                "ai_prompt": row[4] if row[4] is not None else "",
+                "ai_enabled": row[5] if row[5] is not None else True,
+                "whatsapp_source": row[6] if row[6] else "chatflow",
+                "ai_enabled_global": row[7] if row[7] is not None else True,
+                "ai_after_lead_submitted_behavior": row[8] if row[8] else "polite_close",
+                "amocrm_base_domain": row[9],
+            }
+    except Exception as e1:
+        print(f"[WARN] Full raw SQL failed for tenant {tenant_id}: {e1}")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+    
+    # Fallback to minimal columns if some don't exist
+    try:
+        result = await db.execute(text("SELECT id, name, slug, is_active FROM tenants WHERE id = :tid"), {"tid": tenant_id})
+        row = result.fetchone()
+        if row:
+            print(f"[INFO] Got tenant {tenant_id} via minimal raw SQL fallback")
+            return {
+                "id": row[0],
+                "name": row[1],
+                "slug": row[2],
+                "is_active": row[3],
+                "ai_prompt": "",
+                "ai_enabled": True,
+                "whatsapp_source": "chatflow",
+                "ai_enabled_global": True,
+                "ai_after_lead_submitted_behavior": "polite_close",
+                "amocrm_base_domain": None,
+            }
+    except Exception as e2:
+        print(f"[ERROR] Raw SQL also failed for tenant {tenant_id}: {e2}")
+    
+    return None
+
+
 async def _get_tenant_with_fallback(db: AsyncSession, tenant_id: int) -> dict | None:
     """Get tenant data with raw SQL fallback if ORM fails due to missing columns."""
     from sqlalchemy import text
@@ -302,60 +372,8 @@ async def _get_tenant_with_fallback(db: AsyncSession, tenant_id: int) -> dict | 
         else:
             raise
     
-    # Fallback to raw SQL - try to get all Universal Admin columns
-    try:
-        # Try full column set first
-        sql = """
-            SELECT id, name, slug, is_active, 
-                   ai_prompt, ai_enabled, whatsapp_source, ai_enabled_global,
-                   ai_after_lead_submitted_behavior, amocrm_base_domain
-            FROM tenants WHERE id = :tid
-        """
-        result = await db.execute(text(sql), {"tid": tenant_id})
-        row = result.fetchone()
-        if row:
-            print(f"[INFO] Got tenant {tenant_id} via full raw SQL")
-            return {
-                "id": row[0],
-                "name": row[1],
-                "slug": row[2],
-                "is_active": row[3],
-                "ai_prompt": row[4] if row[4] is not None else "",
-                "ai_enabled": row[5] if row[5] is not None else True,
-                "whatsapp_source": row[6] if row[6] else "chatflow",
-                "ai_enabled_global": row[7] if row[7] is not None else True,
-                "ai_after_lead_submitted_behavior": row[8] if row[8] else "polite_close",
-                "amocrm_base_domain": row[9],
-            }
-    except Exception as e1:
-        print(f"[WARN] Full raw SQL failed for tenant {tenant_id}: {e1}")
-        try:
-            await db.rollback()
-        except Exception:
-            pass
-    
-    # Fallback to minimal columns
-    try:
-        result = await db.execute(text("SELECT id, name, slug, is_active, created_at FROM tenants WHERE id = :tid"), {"tid": tenant_id})
-        row = result.fetchone()
-        if row:
-            print(f"[INFO] Got tenant {tenant_id} via minimal raw SQL fallback")
-            return {
-                "id": row[0],
-                "name": row[1],
-                "slug": row[2],
-                "is_active": row[3],
-                "ai_prompt": "",
-                "ai_enabled": True,
-                "whatsapp_source": "chatflow",
-                "ai_enabled_global": True,
-                "ai_after_lead_submitted_behavior": "polite_close",
-                "amocrm_base_domain": None,
-            }
-    except Exception as e2:
-        print(f"[ERROR] Raw SQL also failed for tenant {tenant_id}: {e2}")
-    
-    return None
+    # Use the fresh raw SQL function
+    return await _get_tenant_with_fallback_fresh(db, tenant_id)
 
 
 @router.get("/tenants/{tenant_id}/settings", summary="Настройки tenant для Universal Admin")
@@ -370,12 +388,19 @@ async def get_tenant_settings(
     For admin/owner: returns FULL chatflow_token and ai_prompt.
     For rop/manager: returns chatflow_token_masked only.
     
+    Response includes:
+    - settings.ai_prompt: full text for admin/owner
+    - settings.ai_prompt_len: length of ai_prompt
+    - whatsapp.phone_number, chatflow_instance_id, is_active, binding_exists
+    - whatsapp.chatflow_token: FULL token for admin/owner (None for others)
+    - whatsapp.chatflow_token_masked: masked token for all roles
+    
     ALWAYS returns complete structure with ok:true/false.
     """
     user_role = "manager"  # Default to least privileged
     try:
         user_role = await _require_tenant_access(db, tenant_id, current_user)
-        print(f"[INFO] get_tenant_settings: user_role={user_role}, tenant_id={tenant_id}")
+        print(f"[ADMIN GET] get_tenant_settings: user_id={current_user.id}, user_role={user_role}, tenant_id={tenant_id}")
     except HTTPException as e:
         return _safe_json_error(e.detail, e.status_code)
     except Exception as e:
@@ -384,24 +409,19 @@ async def get_tenant_settings(
         return _safe_json_error(f"Access check failed: {type(e).__name__}", 403)
     
     try:
-        tenant_data = await _get_tenant_with_fallback(db, tenant_id)
+        # Use fresh raw SQL read to bypass ORM cache
+        tenant_data = await _get_tenant_with_fallback_fresh(db, tenant_id)
         if not tenant_data:
             return JSONResponse(
                 status_code=404,
                 content={"ok": False, "detail": f"Tenant {tenant_id} not found"}
             )
         
-        # Build response using tenant_data dict
-        print(f"[INFO] get_tenant_settings: tenant_id={tenant_id}, name={tenant_data.get('name')}, ai_prompt_len={len(tenant_data.get('ai_prompt', ''))}")
+        # Log what we're returning
+        ai_prompt_len = len(tenant_data.get("ai_prompt", "") or "")
+        print(f"[ADMIN GET] tenant_id={tenant_id}, name={tenant_data.get('name')}, ai_prompt_len={ai_prompt_len}, user_role={user_role}")
         
-        # Create a simple object-like wrapper for tenant_data
-        class TenantWrapper:
-            def __init__(self, data):
-                for k, v in data.items():
-                    setattr(self, k, v)
-        
-        tenant = TenantWrapper(tenant_data)
-        response = await _build_tenant_settings_response(db, tenant_id, tenant, user_role=user_role)
+        response = await _build_tenant_settings_response(db, tenant_id, _TenantWrapper(tenant_data), user_role=user_role)
         return response
         
     except Exception as e:
@@ -419,31 +439,52 @@ async def update_tenant_settings(
 ):
     """
     Обновить настройки tenant.
+    
     Поддерживает: whatsapp_source, ai_enabled_global, ai_prompt, ai_after_lead_submitted_behavior, amocrm_base_domain.
+    
+    MERGE SEMANTICS:
+    - Only fields explicitly provided in request body are updated
+    - Omitted fields are NOT touched (preserve existing values)
+    - Empty string for ai_prompt is treated as intentional clear
+    - For whatsapp_source: validates against allowed values
     """
+    from sqlalchemy import text
+    
     try:
         user_role = await _require_tenant_access(db, tenant_id, current_user)
-        print(f"[INFO] update_tenant_settings: user_role={user_role}, tenant_id={tenant_id}")
+        print(f"[ADMIN PATCH] update_tenant_settings: user_id={current_user.id}, user_role={user_role}, tenant_id={tenant_id}")
     except HTTPException as e:
         return _safe_json_error(e.detail, e.status_code)
     except Exception as e:
         print(f"[ERROR] update_tenant_settings access check failed: {type(e).__name__}: {e}")
         return _safe_json_error(f"Access check failed: {type(e).__name__}", 403)
     
-    # Prepare update data
+    # Get only fields that were explicitly provided (exclude_unset=True)
     update_data = body.model_dump(exclude_unset=True)
-    print(f"[INFO] update_tenant_settings: tenant_id={tenant_id}, fields to update: {list(update_data.keys())}")
     
-    # Use raw SQL update for maximum compatibility
-    # This avoids ORM issues when columns might not exist in older schema
-    from sqlalchemy import text
+    # Log what we're updating (mask ai_prompt if long)
+    log_data = {}
+    for k, v in update_data.items():
+        if k == "ai_prompt" and v:
+            log_data[k] = f"<{len(v)} chars>"
+        else:
+            log_data[k] = v
+    print(f"[ADMIN PATCH] tenant_id={tenant_id}, fields_to_update={log_data}")
+    
+    if not update_data:
+        # No fields provided - just return current settings
+        print(f"[ADMIN PATCH] No fields to update, returning current settings")
+        tenant_data = await _get_tenant_with_fallback_fresh(db, tenant_id)
+        if not tenant_data:
+            return JSONResponse(status_code=404, content={"ok": False, "detail": "Tenant not found"})
+        return await _build_tenant_settings_response(db, tenant_id, _TenantWrapper(tenant_data), user_role=user_role)
     
     try:
         # Build UPDATE query dynamically
         updates = []
         params = {"tid": tenant_id}
         
-        # Map request fields to DB columns
+        # Map request fields to DB columns with validation
         field_mapping = {
             "whatsapp_source": "whatsapp_source",
             "ai_enabled_global": "ai_enabled_global",
@@ -455,51 +496,63 @@ async def update_tenant_settings(
         for req_field, db_field in field_mapping.items():
             if req_field in update_data:
                 value = update_data[req_field]
-                # Normalize amocrm_base_domain
+                
+                # Validation and normalization
                 if req_field == "amocrm_base_domain" and value:
                     value = _normalize_amocrm_domain(value)
+                elif req_field == "whatsapp_source" and value:
+                    if value not in ("chatflow", "amomarket"):
+                        return JSONResponse(
+                            status_code=422,
+                            content={"ok": False, "detail": f"Invalid whatsapp_source: '{value}'. Allowed: chatflow, amomarket"}
+                        )
+                
                 updates.append(f"{db_field} = :{db_field}")
                 params[db_field] = value
         
         if updates:
-            # Try update with all fields first
+            # Execute update with all fields
+            query = f"UPDATE tenants SET {', '.join(updates)} WHERE id = :tid"
             try:
-                query = f"UPDATE tenants SET {', '.join(updates)} WHERE id = :tid"
-                await db.execute(text(query), params)
+                result = await db.execute(text(query), params)
                 await db.commit()
-                print(f"[INFO] update_tenant_settings: updated tenant {tenant_id} with {len(updates)} fields")
+                rows_affected = result.rowcount if hasattr(result, 'rowcount') else 1
+                print(f"[ADMIN PATCH] UPDATE executed: tenant_id={tenant_id}, fields={len(updates)}, rows_affected={rows_affected}")
             except Exception as e:
                 error_str = str(e).lower()
-                # If specific column doesn't exist, try updating only core fields
+                # If column doesn't exist, try fallback
                 if "column" in error_str or "does not exist" in error_str or "no such column" in error_str:
-                    print(f"[WARN] Some columns missing, trying core fields only: {e}")
+                    print(f"[WARN] Some columns missing, trying ai_prompt only: {e}")
                     try:
                         await db.rollback()
                     except Exception:
                         pass
                     
-                    # Try only ai_prompt which should always exist
                     if "ai_prompt" in update_data:
                         core_query = "UPDATE tenants SET ai_prompt = :ai_prompt WHERE id = :tid"
                         core_params = {"tid": tenant_id, "ai_prompt": update_data["ai_prompt"]}
                         await db.execute(text(core_query), core_params)
                         await db.commit()
-                        print(f"[INFO] update_tenant_settings: updated ai_prompt only for tenant {tenant_id}")
+                        print(f"[ADMIN PATCH] Updated ai_prompt only for tenant {tenant_id}")
                 else:
                     raise
         
-        # Fetch updated tenant and return
-        tenant_data = await _get_tenant_with_fallback(db, tenant_id)
+        # CRITICAL: Invalidate ORM cache and fetch fresh data using raw SQL
+        # This ensures read-after-write consistency
+        try:
+            db.expire_all()
+        except Exception:
+            pass
+        
+        tenant_data = await _get_tenant_with_fallback_fresh(db, tenant_id)
         if not tenant_data:
-            return JSONResponse(status_code=404, content={"ok": False, "detail": "Tenant not found"})
+            return JSONResponse(status_code=404, content={"ok": False, "detail": "Tenant not found after update"})
         
-        class TenantWrapper:
-            def __init__(self, data):
-                for k, v in data.items():
-                    setattr(self, k, v)
+        # Log what we read back
+        ai_prompt_len = len(tenant_data.get("ai_prompt", "") or "")
+        print(f"[ADMIN PATCH] Read-after-write: tenant_id={tenant_id}, ai_prompt_len={ai_prompt_len}")
         
-        # Pass user_role to include full credentials for admin/owner
-        response = await _build_tenant_settings_response(db, tenant_id, TenantWrapper(tenant_data), user_role=user_role)
+        response = await _build_tenant_settings_response(db, tenant_id, _TenantWrapper(tenant_data), user_role=user_role)
         return response
         
     except Exception as e:
@@ -1086,9 +1139,17 @@ async def tenant_snapshot(
 ):
     """
     Диагностика: настройки tenant, привязка WhatsApp, amoCRM, количество маппингов.
+    
+    Uses fresh raw SQL read to ensure consistency after saves.
+    Returns:
+    - settings: ai_prompt_len, ai_prompt_is_set, ai_prompt_preview, ai_enabled_global, etc.
+    - whatsapp: binding_exists, is_active, phone_number, instance_id, token_present, credentials_ok, ready
+    - amocrm: connected, base_domain, expires_at
+    - mappings: counts
     """
     try:
-        tenant_data = await _get_tenant_with_fallback(db, tenant_id)
+        # Use fresh raw SQL read to bypass ORM cache
+        tenant_data = await _get_tenant_with_fallback_fresh(db, tenant_id)
         if not tenant_data:
             return JSONResponse(status_code=404, content={"ok": False, "detail": "Tenant not found"})
         

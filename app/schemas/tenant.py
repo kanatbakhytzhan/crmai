@@ -98,6 +98,19 @@ class TenantSettingsResponse(BaseModel):
     mappings: MappingsSnapshot = Field(default_factory=MappingsSnapshot)
 
 
+# ========== AI Settings (legacy endpoints) ==========
+
+class AISettingsResponse(BaseModel):
+    """Response for GET/PATCH /api/admin/tenants/{id}/ai-settings"""
+    ai_enabled: bool = True
+    ai_prompt: Optional[str] = None
+
+
+class AISettingsUpdate(BaseModel):
+    """Request for PATCH /api/admin/tenants/{id}/ai-settings"""
+    ai_enabled: Optional[bool] = None
+    ai_prompt: Optional[str] = None
+
 
 class TenantSettingsUpdate(BaseModel):
     """PATCH /api/admin/tenants/{id}/settings"""

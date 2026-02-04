@@ -20,8 +20,6 @@ from app.schemas.tenant import (
     WhatsAppAccountCreate,
     WhatsAppAccountResponse,
     WhatsAppAccountUpsert,
-    WhatsAppAccountResponse,
-    WhatsAppAccountUpsert,
     WhatsAppSaved,
 )
 import app.schemas.tenant as tenant_schemas

@@ -1303,16 +1303,39 @@ async def set_amocrm_primary_pipeline(
 ):
     """
     Set default/primary pipeline for the tenant.
+    Empty pipeline_id is treated as None (unset).
     """
-    tenant = await crud.get_tenant_by_id(db, tenant_id)
-    if not tenant:
-        raise HTTPException(status_code=404, detail="Tenant not found")
-        
-    tenant.default_pipeline_id = str(body.pipeline_id)
-    await db.commit()
-    await db.refresh(tenant)
+    from fastapi.responses import JSONResponse
     
-    return {"ok": True, "primary_pipeline_id": tenant.default_pipeline_id}
+    try:
+        tenant = await crud.get_tenant_by_id(db, tenant_id)
+        if not tenant:
+            return JSONResponse(
+                status_code=404,
+                content={"ok": False, "detail": "Tenant not found", "code": "TENANT_NOT_FOUND"}
+            )
+        
+        # Handle empty string → None
+        pipeline_id = (body.pipeline_id or "").strip()
+        if not pipeline_id:
+            pipeline_id = None
+            print(f"[ADMIN PUT] Primary pipeline: empty string, setting to None for tenant {tenant_id}")
+        
+        tenant.default_pipeline_id = pipeline_id
+        await db.commit()
+        await db.refresh(tenant)
+        
+        return {"ok": True, "primary_pipeline_id": tenant.default_pipeline_id}
+    
+    except Exception as e:
+        import traceback
+        print(f"[ERROR] set_amocrm_primary_pipeline failed: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "detail": f"Failed to set primary pipeline: {type(e).__name__}"}
+        )
+
 
 
 @router.get("/tenants/{tenant_id}/amocrm/pipeline-mapping", summary="Get pipeline mapping", tags=["AmoCRM"])
@@ -1356,50 +1379,113 @@ async def save_amocrm_pipeline_mapping(
 ):
     """
     Save both primary pipeline and stage mappings.
+    
+    Accepts mapping as:
+    - dict[str, str]: {"stage_key": "stage_id", ...}
+    - list[dict]: [{"stage_key": "key1", "stage_id": "id1"}, ...]
+    
+    Empty primary_pipeline_id is treated as None (unset).
     """
-    tenant = await crud.get_tenant_by_id(db, tenant_id)
-    if not tenant:
-        raise HTTPException(status_code=404, detail="Tenant not found")
-
-    # 1. Update primary pipeline
-    tenant.default_pipeline_id = str(body.primary_pipeline_id)
+    from fastapi.responses import JSONResponse
     
-    # 2. Update mappings
-    # We'll stick to a simple strategy: upsert.
-    # First, deactivate or delete old ones? Or just upsert.
-    # Let's check existing mapping to update or insert.
-    
-    # For simplicity, we can delete old mappings for this tenant/provider and insert new ones, 
-    # but that might lose history if we track it. 
-    # Let's iterate and merge.
-    
-    for stage_key, stage_id in body.mapping.items():
-        # Check if exists
-        q = select(models.TenantPipelineMapping).where(
-            models.TenantPipelineMapping.tenant_id == tenant_id,
-            models.TenantPipelineMapping.provider == "amocrm",
-            models.TenantPipelineMapping.stage_key == stage_key
-        )
-        res = await db.execute(q)
-        existing = res.scalars().first()
-        
-        if existing:
-            existing.stage_id = str(stage_id)
-            existing.pipeline_id = str(body.primary_pipeline_id)
-            existing.is_active = True
-        else:
-            new_mapping = models.TenantPipelineMapping(
-                tenant_id=tenant_id,
-                provider="amocrm",
-                pipeline_id=str(body.primary_pipeline_id),
-                stage_key=stage_key,
-                stage_id=str(stage_id),
-                is_active=True
+    try:
+        tenant = await crud.get_tenant_by_id(db, tenant_id)
+        if not tenant:
+            return JSONResponse(
+                status_code=404,
+                content={"ok": False, "detail": "Tenant not found", "code": "TENANT_NOT_FOUND"}
             )
-            db.add(new_mapping)
+
+        # 1. Handle primary_pipeline_id (empty string → None)
+        primary_pipeline_id = (body.primary_pipeline_id or "").strip()
+        if not primary_pipeline_id:
+            primary_pipeline_id = None
+            print(f"[ADMIN PUT] AmoCRM mapping: primary_pipeline_id is empty, setting to None")
+        
+        tenant.default_pipeline_id = primary_pipeline_id
+        
+        # 2. Convert mapping to dict if it's a list
+        mapping_dict = {}
+        if isinstance(body.mapping, dict):
+            mapping_dict = body.mapping
+        elif isinstance(body.mapping, list):
+            # Convert list of {stage_key, stage_id} to dict
+            for item in body.mapping:
+                if isinstance(item, dict):
+                    stage_key = item.get("stage_key")
+                    stage_id = item.get("stage_id")
+                    if stage_key:  # Only add if stage_key exists
+                        mapping_dict[stage_key] = stage_id or ""
+                else:
+                    print(f"[WARN] Invalid mapping item (not a dict): {item}")
+            print(f"[ADMIN PUT] Converted list mapping to dict: {len(mapping_dict)} entries")
+        else:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "detail": f"Invalid mapping format. Expected dict or list, got {type(body.mapping).__name__}",
+                    "code": "INVALID_MAPPING_FORMAT"
+                }
+            )
+        
+        # 3. Update mappings (upsert strategy)
+        saved_count = 0
+        for stage_key, stage_id in mapping_dict.items():
+            # Skip if stage_id is None or empty (unless we want to allow clearing)
+            if not stage_id or not str(stage_id).strip():
+                print(f"[ADMIN PUT] Skipping empty stage_id for stage_key={stage_key}")
+                continue
             
-    await db.commit()
-    await db.refresh(tenant)
+            # Check if exists
+            q = select(models.TenantPipelineMapping).where(
+                models.TenantPipelineMapping.tenant_id == tenant_id,
+                models.TenantPipelineMapping.provider == "amocrm",
+                models.TenantPipelineMapping.stage_key == stage_key
+            )
+            res = await db.execute(q)
+            existing = res.scalars().first()
+            
+            if existing:
+                existing.stage_id = str(stage_id)
+                existing.pipeline_id = primary_pipeline_id or ""
+                existing.is_active = True
+            else:
+                new_mapping = models.TenantPipelineMapping(
+                    tenant_id=tenant_id,
+                    provider="amocrm",
+                    pipeline_id=primary_pipeline_id or "",
+                    stage_key=stage_key,
+                    stage_id=str(stage_id),
+                    is_active=True
+                )
+                db.add(new_mapping)
+            saved_count += 1
+                
+        await db.commit()
+        await db.refresh(tenant)
+        
+        print(f"[ADMIN PUT] AmoCRM mapping saved: tenant_id={tenant_id}, primary_pipeline_id={primary_pipeline_id}, mappings={saved_count}")
+        
+        return {
+            "ok": True,
+            "detail": "Mappings saved",
+            "primary_pipeline_id": primary_pipeline_id,
+            "mappings_saved": saved_count
+        }
     
-    return {"ok": True, "detail": "Mappings saved"}
+    except Exception as e:
+        import traceback
+        print(f"[ERROR] save_amocrm_pipeline_mapping failed: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "detail": f"Failed to save mappings: {type(e).__name__}",
+                "code": "SAVE_FAILED"
+            }
+        )
+
+
 

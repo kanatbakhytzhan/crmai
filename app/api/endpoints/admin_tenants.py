@@ -1176,3 +1176,79 @@ async def get_whatsapp_diagnostics(
             status_code=500,
             content={"ok": False, "detail": f"Diagnostics failed: {type(e).__name__}"}
         )
+
+
+# --- AmoCRM Integration Endpoints ---
+
+@router.get("/tenants/{tenant_id}/amocrm/discovery", summary="Get AmoCRM pipelines and fields", tags=["AmoCRM"])
+async def get_amocrm_discovery(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_or_owner_or_rop),
+):
+    """
+    Получить список воронок, статусов и полей из AmoCRM для настройки маппинга.
+    """
+    from app.services.amocrm_service import AmoCRMService
+    service = AmoCRMService(db)
+    
+    # Check connection
+    account = await service.get_account_info(tenant_id)
+    if not account.get("connected"):
+        return {"ok": False, "error": "AmoCRM not connected"}
+
+    pipelines = await service.list_pipelines(tenant_id)
+    
+    formatted_pipelines = []
+    for p in pipelines:
+        statuses = []
+        raw_statuses = p.get("_embedded", {}).get("statuses", [])
+        for s in raw_statuses:
+            statuses.append({"id": s["id"], "name": s["name"], "color": s.get("color")})
+        formatted_pipelines.append({
+            "id": p["id"],
+            "name": p["name"],
+            "is_main": p.get("is_main", False),
+            "statuses": statuses
+        })
+
+    # Custom fields
+    fields_leads = await service.list_custom_fields(tenant_id, "leads")
+    fields_contacts = await service.list_custom_fields(tenant_id, "contacts")
+    
+    return {
+        "ok": True,
+        "pipelines": formatted_pipelines,
+        "fields": {
+            "leads": [{"id": f["id"], "name": f["name"], "code": f.get("code")} for f in fields_leads],
+            "contacts": [{"id": f["id"], "name": f["name"], "code": f.get("code")} for f in fields_contacts],
+        }
+    }
+
+
+@router.post("/tenants/{tenant_id}/amocrm/test-sync", summary="Test AmoCRM sync manually", tags=["AmoCRM"])
+async def test_amocrm_sync(
+    tenant_id: int,
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_or_owner_or_rop),
+):
+    """
+    Тестовая отправка лида в AmoCRM.
+    Payload: {"phone": "7999...", "text": "Test message", "sender_name": "Tester"}
+    """
+    from app.services.amocrm_service import AmoCRMService
+    from app.database import crud
+    
+    tenant = await crud.get_tenant(db, tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    service = AmoCRMService(db)
+    result = await service.sync_to_amocrm(tenant, {
+        "phone_number": payload.get("phone"),
+        "body": payload.get("text", "Test sync message"),
+        "sender_name": payload.get("sender_name", "Test User"),
+    })
+    
+    return result

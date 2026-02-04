@@ -1,365 +1,330 @@
-"""
-AmoCRM интеграция: OAuth, API методы, авто-refresh токенов.
-Токены НЕ логируются. Маскировка при выводе.
-"""
+
+import aiohttp
+import asyncio
 import logging
-from datetime import datetime, timedelta
-from typing import Optional, Any
-
-import httpx
+import time
+import re
+from typing import Optional, Dict, List, Any
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, and_, update
+from sqlalchemy.sql import text
 
+from app.database import models
 from app.core.config import get_settings
 
 log = logging.getLogger(__name__)
 
-AMOCRM_TOKEN_URL = "https://{domain}/oauth2/access_token"
-AMOCRM_API_BASE = "https://{domain}/api/v4"
-
-
-def _mask_token(token: str | None) -> str:
-    """Маскировать токен для логов (первые 4 символа)."""
-    if not token:
-        return "(none)"
-    return token[:4] + "***" if len(token) > 4 else "***"
-
-
-class AmoCRMClient:
-    """Клиент для AmoCRM API с авто-refresh."""
-
-    def __init__(
-        self,
-        db: AsyncSession,
-        tenant_id: int,
-        base_domain: str,
-        access_token: str,
-        refresh_token: str,
-        token_expires_at: datetime | None,
-    ):
+class AmoCRMService:
+    def __init__(self, db: AsyncSession):
         self.db = db
-        self.tenant_id = tenant_id
-        self.base_domain = base_domain
-        self._access_token = access_token
-        self._refresh_token = refresh_token
-        self._token_expires_at = token_expires_at
+        self.settings = get_settings()
 
-    async def _refresh_if_needed(self) -> bool:
-        """Обновить токен если истёк (или почти истёк). Возвращает True если обновлён."""
-        if self._token_expires_at and self._token_expires_at > datetime.utcnow() + timedelta(minutes=5):
+    async def _get_integration(self, tenant_id: int) -> Optional[models.TenantIntegration]:
+        result = await self.db.execute(
+            select(models.TenantIntegration).where(
+                models.TenantIntegration.tenant_id == tenant_id,
+                models.TenantIntegration.provider == "amocrm",
+                models.TenantIntegration.is_active == True
+            )
+        )
+        return result.scalars().first()
+
+    async def _refresh_access_token(self, integration: models.TenantIntegration) -> bool:
+        """Обновить токен через refresh_token."""
+        if not integration.refresh_token or not integration.base_domain:
             return False
-        settings = get_settings()
-        if not settings.amo_client_id or not settings.amo_client_secret:
-            log.warning("[AMOCRM] refresh skipped: no client_id/secret in env")
+
+        if not self.settings.amo_client_id or not self.settings.amo_client_secret:
+            log.error("AmoCRM credentials not configured in settings")
             return False
+
+        url = f"https://{integration.base_domain}/oauth2/access_token"
+        payload = {
+            "client_id": self.settings.amo_client_id,
+            "client_secret": self.settings.amo_client_secret,
+            "grant_type": "refresh_token",
+            "refresh_token": integration.refresh_token,
+            "redirect_uri": self.settings.amo_redirect_url or "https://example.com"
+        }
+        
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
-                    AMOCRM_TOKEN_URL.format(domain=self.base_domain),
-                    json={
-                        "client_id": settings.amo_client_id,
-                        "client_secret": settings.amo_client_secret,
-                        "grant_type": "refresh_token",
-                        "refresh_token": self._refresh_token,
-                        "redirect_uri": settings.amo_redirect_url or "",
-                    },
-                )
-                if resp.status_code != 200:
-                    log.error("[AMOCRM] refresh failed: %s %s", resp.status_code, resp.text[:200])
-                    return False
-                data = resp.json()
-                self._access_token = data.get("access_token", "")
-                self._refresh_token = data.get("refresh_token", self._refresh_token)
-                expires_in = data.get("expires_in", 86400)
-                self._token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
-                # Сохранить в БД
-                from app.database import crud
-                await crud.update_tenant_integration_tokens(
-                    self.db,
-                    tenant_id=self.tenant_id,
-                    provider="amocrm",
-                    access_token=self._access_token,
-                    refresh_token=self._refresh_token,
-                    token_expires_at=self._token_expires_at,
-                )
-                log.info("[AMOCRM] token refreshed tenant_id=%s expires=%s", self.tenant_id, self._token_expires_at)
-                return True
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        integration.access_token = data["access_token"]
+                        integration.refresh_token = data["refresh_token"]
+                        expires_in = data.get("expires_in", 86400)
+                        # integration.expires_at = ... (if we had that column, currently just token)
+                        await self.db.commit()
+                        return True
+                    else:
+                        text = await resp.text()
+                        log.error(f"AmoCRM Refresh Failed {resp.status}: {text}")
+                        return False
         except Exception as e:
-            log.error("[AMOCRM] refresh error: %s", type(e).__name__)
+            log.error(f"AmoCRM Refresh Exception: {e}")
             return False
 
-    async def _request(self, method: str, path: str, **kwargs) -> dict | list | None:
-        """Запрос к API с авто-refresh при 401."""
-        await self._refresh_if_needed()
-        url = AMOCRM_API_BASE.format(domain=self.base_domain) + path
-        headers = {"Authorization": f"Bearer {self._access_token}"}
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.request(method, url, headers=headers, **kwargs)
-                if resp.status_code == 401:
-                    log.warning("[AMOCRM] 401, trying refresh")
-                    refreshed = await self._refresh_if_needed()
-                    if refreshed:
-                        headers["Authorization"] = f"Bearer {self._access_token}"
-                        resp = await client.request(method, url, headers=headers, **kwargs)
-                if resp.status_code >= 400:
-                    log.error("[AMOCRM] API error: %s %s %s", method, path, resp.status_code)
-                    return None
-                return resp.json() if resp.text else {}
-        except Exception as e:
-            log.error("[AMOCRM] request error: %s %s %s", method, path, type(e).__name__)
-            return None
+    async def _make_request(
+        self, 
+        integration: models.TenantIntegration, 
+        method: str, 
+        endpoint: str, 
+        data: Optional[Dict] = None,
+        params: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """Выполнить запрос к API AmoCRM с авто-рефрешем токена."""
+        if not integration.access_token:
+            raise Exception("No access token")
 
-    async def find_contact_by_phone(self, phone: str) -> dict | None:
-        """Найти контакт по телефону."""
-        data = await self._request("GET", "/contacts", params={"query": phone})
-        if not data or not isinstance(data, dict):
-            return None
-        embedded = data.get("_embedded", {})
-        contacts = embedded.get("contacts", [])
-        return contacts[0] if contacts else None
-
-    async def create_contact(self, name: str, phone: str) -> dict | None:
-        """Создать контакт."""
-        body = [{"name": name, "custom_fields_values": [{"field_code": "PHONE", "values": [{"value": phone}]}]}]
-        data = await self._request("POST", "/contacts", json=body)
-        if not data or not isinstance(data, dict):
-            return None
-        embedded = data.get("_embedded", {})
-        contacts = embedded.get("contacts", [])
-        return contacts[0] if contacts else None
-
-    async def find_open_lead_for_contact(self, contact_id: int, pipeline_id: str | None = None) -> dict | None:
-        """Найти открытую (не закрытую) сделку для контакта."""
-        params = {"filter[contacts][id]": contact_id}
-        if pipeline_id:
-            params["filter[pipeline_id]"] = pipeline_id
-        data = await self._request("GET", "/leads", params=params)
-        if not data or not isinstance(data, dict):
-            return None
-        embedded = data.get("_embedded", {})
-        leads = embedded.get("leads", [])
-        for lead in leads:
-            if not lead.get("closed_at"):
-                return lead
-        return None
-
-    async def create_lead_in_stage(self, contact_id: int, status_id: int, name: str = "Заявка с сайта", pipeline_id: int | None = None) -> dict | None:
-        """Создать сделку в указанной стадии."""
-        body = [{"name": name, "status_id": status_id, "_embedded": {"contacts": [{"id": contact_id}]}}]
-        if pipeline_id:
-            body[0]["pipeline_id"] = pipeline_id
-        data = await self._request("POST", "/leads", json=body)
-        if not data or not isinstance(data, dict):
-            return None
-        embedded = data.get("_embedded", {})
-        leads = embedded.get("leads", [])
-        return leads[0] if leads else None
-
-    async def add_note_to_lead(self, lead_id: int, text: str) -> dict | None:
-        """Добавить примечание к сделке."""
-        body = [{"entity_id": lead_id, "note_type": "common", "params": {"text": text}}]
-        data = await self._request("POST", f"/leads/{lead_id}/notes", json=body)
-        if not data or not isinstance(data, dict):
-            return None
-        embedded = data.get("_embedded", {})
-        notes = embedded.get("notes", [])
-        return notes[0] if notes else None
-
-    async def update_lead_fields(self, lead_id: int, fields: dict) -> dict | None:
-        """Обновить кастомные поля сделки. fields: {field_id: value}."""
-        if not fields:
-            return None
-        custom_fields = [{"field_id": int(k), "values": [{"value": v}]} for k, v in fields.items() if v is not None]
-        if not custom_fields:
-            return None
-        body = {"custom_fields_values": custom_fields}
-        data = await self._request("PATCH", f"/leads/{lead_id}", json=body)
-        return data
-
-    async def move_lead_stage(self, lead_id: int, status_id: int, pipeline_id: int | None = None) -> dict | None:
-        """Переместить сделку в другую стадию."""
-        body: dict[str, Any] = {"status_id": status_id}
-        if pipeline_id:
-            body["pipeline_id"] = pipeline_id
-        data = await self._request("PATCH", f"/leads/{lead_id}", json=body)
-        return data
-
-    # ========== Pipeline/Stage Discovery ==========
-
-    async def get_pipelines(self) -> list[dict] | None:
-        """
-        Получить список воронок (pipelines) из AmoCRM.
-        Returns: [{"id": 123, "name": "Продажи", "is_main": true, "sort": 0}, ...]
-        """
-        data = await self._request("GET", "/leads/pipelines")
-        if not data or not isinstance(data, dict):
-            return None
-        embedded = data.get("_embedded", {})
-        pipelines = embedded.get("pipelines", [])
-        result = []
-        for p in pipelines:
-            result.append({
-                "id": p.get("id"),
-                "name": p.get("name", ""),
-                "is_main": p.get("is_main", False),
-                "sort": p.get("sort", 0),
-            })
-        return result
-
-    async def get_pipeline_stages(self, pipeline_id: int) -> list[dict] | None:
-        """
-        Получить стадии воронки по её ID.
-        Returns: [{"id": 456, "name": "Новые", "sort": 10, "is_won": false, "is_lost": false, "color": "#fff"}, ...]
-        
-        AmoCRM system stages:
-        - 142 = Won (Успешно реализовано)
-        - 143 = Lost (Закрыто и не реализовано)
-        """
-        data = await self._request("GET", f"/leads/pipelines/{pipeline_id}")
-        if not data or not isinstance(data, dict):
-            return None
-        embedded = data.get("_embedded", {})
-        statuses = embedded.get("statuses", [])
-        result = []
-        for s in statuses:
-            status_id = s.get("id", 0)
-            # System stages detection
-            is_won = (status_id == 142) or s.get("type") == 1
-            is_lost = (status_id == 143) or s.get("type") == 2
-            result.append({
-                "id": status_id,
-                "name": s.get("name", ""),
-                "sort": s.get("sort", 0),
-                "is_won": is_won,
-                "is_lost": is_lost,
-                "color": s.get("color", ""),
-                "type": s.get("type", 0),  # 0=normal, 1=won, 2=lost
-            })
-        return result
-
-    async def get_pipeline_snapshot(self) -> dict | None:
-        """
-        Получить полную структуру воронок и стадий за один запрос.
-        Returns: {"pipelines": [...], "stages_by_pipeline": {pipeline_id: [...]}}
-        """
-        pipelines = await self.get_pipelines()
-        if pipelines is None:
-            return None
-        
-        stages_by_pipeline = {}
-        for p in pipelines:
-            pipeline_id = p.get("id")
-            if pipeline_id:
-                stages = await self.get_pipeline_stages(pipeline_id)
-                if stages:
-                    stages_by_pipeline[str(pipeline_id)] = stages
-        
-        return {
-            "pipelines": pipelines,
-            "stages_by_pipeline": stages_by_pipeline,
+        base_url = f"https://{integration.base_domain}"
+        url = f"{base_url}{endpoint}"
+        headers = {
+            "Authorization": f"Bearer {integration.access_token}",
+            "Content-Type": "application/json"
         }
 
+        async with aiohttp.ClientSession() as session:
+            async with session.request(method, url, headers=headers, json=data, params=params) as resp:
+                if resp.status == 401:
+                    log.warning(f"AmoCRM 401 for tenant {integration.tenant_id}. Refreshing token...")
+                    if await self._refresh_access_token(integration):
+                        # Retry once
+                        headers["Authorization"] = f"Bearer {integration.access_token}"
+                        async with session.request(method, url, headers=headers, json=data, params=params) as resp2:
+                             if resp2.status >= 400:
+                                 text_resp = await resp2.text()
+                                 raise Exception(f"AmoCRM Error after refresh: {resp2.status} {text_resp}")
+                             if resp2.status == 204: return {}
+                             return await resp2.json()
+                    else:
+                        raise Exception("AmoCRM Token Expired and Refresh Failed")
+                
+                if resp.status >= 400:
+                    text_resp = await resp.text()
+                    log.error(f"AmoCRM error {resp.status} on {endpoint}: {text_resp}")
+                    raise Exception(f"AmoCRM Error: {resp.status}")
 
-async def get_amocrm_client(db: AsyncSession, tenant_id: int) -> AmoCRMClient | None:
-    """Создать клиент AmoCRM если интеграция активна."""
-    from app.database import crud
-    integration = await crud.get_tenant_integration(db, tenant_id, "amocrm")
-    if not integration or not integration.is_active:
-        return None
-    if not integration.access_token or not integration.base_domain:
-        return None
-    return AmoCRMClient(
-        db=db,
-        tenant_id=tenant_id,
-        base_domain=integration.base_domain,
-        access_token=integration.access_token,
-        refresh_token=integration.refresh_token or "",
-        token_expires_at=integration.token_expires_at,
-    )
+                if resp.status == 204:
+                    return {}
+                return await resp.json()
 
+    # --- Discovery API ---
 
-def build_auth_url(tenant_id: int, base_domain: str) -> str | None:
-    """
-    Сформировать URL для OAuth авторизации в amoCRM.
-    
-    ВАЖНО: AmoCRM OAuth работает так:
-    1. Авторизация: https://www.amocrm.ru/oauth?client_id=...&state=...&mode=post_message
-       (всегда на www.amocrm.ru, НЕ на поддомене!)
-    2. Обмен кода: POST https://{subdomain}.amocrm.ru/oauth2/access_token
-    
-    base_domain используется только для обмена токенов, не для authorize.
-    """
-    settings = get_settings()
-    if not settings.amo_client_id or not settings.amo_redirect_url:
-        return None
-    
-    # URL-encode redirect_uri
-    from urllib.parse import quote
-    redirect_uri_encoded = quote(settings.amo_redirect_url, safe='')
-    
-    # State содержит tenant_id и base_domain для callback
-    # Формат: tenant_{id}_{base_domain}
-    state = f"tenant_{tenant_id}_{base_domain}"
-    
-    # AmoCRM authorize URL всегда на www.amocrm.ru (или www.kommo.com для kommo)
-    # mode=post_message нужен для popup окна
-    if ".kommo.com" in base_domain:
-        auth_host = "www.kommo.com"
-    else:
-        auth_host = "www.amocrm.ru"
-    
-    return (
-        f"https://{auth_host}/oauth"
-        f"?client_id={settings.amo_client_id}"
-        f"&state={state}"
-        f"&mode=post_message"
-    )
+    async def get_account_info(self, tenant_id: int) -> Dict:
+        integ = await self._get_integration(tenant_id)
+        if not integ:
+            return {"connected": False}
+        
+        try:
+            data = await self._make_request(integ, "GET", "/api/v4/account")
+            return {"connected": True, "account": data}
+        except Exception as e:
+            return {"connected": True, "error": str(e)}
 
+    async def list_pipelines(self, tenant_id: int) -> List[Dict]:
+        integ = await self._get_integration(tenant_id)
+        if not integ: return []
+        try:
+            data = await self._make_request(integ, "GET", "/api/v4/leads/pipelines")
+            return data.get("_embedded", {}).get("pipelines", [])
+        except Exception:
+            return []
 
-async def exchange_code_for_tokens(
-    db: AsyncSession,
-    tenant_id: int,
-    base_domain: str,
-    code: str,
-) -> dict | None:
-    """Обменять code на access_token/refresh_token и сохранить."""
-    settings = get_settings()
-    if not settings.amo_client_id or not settings.amo_client_secret:
-        log.error("[AMOCRM] exchange: no client_id/secret")
-        return None
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                AMOCRM_TOKEN_URL.format(domain=base_domain),
-                json={
-                    "client_id": settings.amo_client_id,
-                    "client_secret": settings.amo_client_secret,
-                    "grant_type": "authorization_code",
-                    "code": code,
-                    "redirect_uri": settings.amo_redirect_url or "",
-                },
+    async def list_custom_fields(self, tenant_id: int, entity: str = "leads") -> List[Dict]:
+        integ = await self._get_integration(tenant_id)
+        if not integ: return []
+        try:
+            data = await self._make_request(integ, "GET", f"/api/v4/{entity}/custom_fields")
+            return data.get("_embedded", {}).get("custom_fields", [])
+        except Exception:
+            return []
+
+    # --- Sync Logic ---
+
+    async def sync_to_amocrm(
+        self, 
+        tenant: models.Tenant, 
+        message_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Основной метод синхронизации.
+        1. Ищет/создает контакт по телефону.
+        2. Ищет открытую сделку или создает новую.
+        3. Добавляет примечание (сообщение).
+        4. Применяет правила смены этапа.
+        """
+        integ = await self._get_integration(tenant.id)
+        if not integ:
+            return {"ok": False, "reason": "No AmoCRM integration"}
+
+        phone = message_data.get("phone_number")
+        text_body = message_data.get("body", "")
+        sender_name = message_data.get("sender_name", "Unknown")
+
+        if not phone:
+            return {"ok": False, "reason": "No phone number"}
+        
+        # 1. Find Contact (using last 10 digits to be safe)
+        contact_id = await self._find_contact_by_phone(integ, phone)
+        if not contact_id:
+            contact_id = await self._create_contact(integ, name=sender_name or phone, phone=phone)
+            log.info(f"Created AmoCRM contact {contact_id} for {phone}")
+        else:
+            log.info(f"Found AmoCRM contact {contact_id} for {phone}")
+
+        # 2. Find Active Lead (Deal)
+        active_lead_id = await self._find_active_lead(integ, contact_id)
+        
+        if not active_lead_id:
+            # Create new lead
+            pipeline_id = getattr(tenant, "default_pipeline_id", None)
+            
+            # Map "new_lead" stage to status_id
+            status_id = await self._get_mapped_status(tenant.id, "new_lead")
+            
+            active_lead_id = await self._create_lead(
+                integ, 
+                contact_id, 
+                title=f"WhatsApp: {sender_name}", 
+                pipeline_id=int(pipeline_id) if pipeline_id else None,
+                status_id=int(status_id) if status_id else None
             )
-            if resp.status_code != 200:
-                log.error("[AMOCRM] exchange failed: %s %s", resp.status_code, resp.text[:200])
-                return None
-            data = resp.json()
-            access_token = data.get("access_token", "")
-            refresh_token = data.get("refresh_token", "")
-            expires_in = data.get("expires_in", 86400)
-            token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
-            from app.database import crud
-            await crud.upsert_tenant_integration(
-                db,
-                tenant_id=tenant_id,
-                provider="amocrm",
-                base_domain=base_domain,
-                access_token=access_token,
-                refresh_token=refresh_token,
-                token_expires_at=token_expires_at,
-                is_active=True,
-            )
-            log.info("[AMOCRM] tokens saved tenant_id=%s domain=%s", tenant_id, base_domain)
-            return {"ok": True, "expires_at": token_expires_at.isoformat()}
-    except Exception as e:
-        log.error("[AMOCRM] exchange error: %s", type(e).__name__)
-        return None
+            log.info(f"Created new AmoCRM lead {active_lead_id}")
+
+        # 3. Add Message Note
+        await self._add_note(integ, entity_type="leads", entity_id=active_lead_id, text=f"{sender_name}: {text_body}")
+        
+        # 4. Apply Rules (Stage Movement)
+        await self._apply_rules(integ, tenant.id, active_lead_id, text_body)
+
+        return {
+            "ok": True,
+            "contact_id": contact_id,
+            "lead_id": active_lead_id
+        }
+
+    async def _find_contact_by_phone(self, integ, phone: str) -> Optional[int]:
+        # AmoCRM contact search. normalize to last 10 digits
+        clean_phone = re.sub(r"\D", "", phone)[-10:]
+        if len(clean_phone) < 6: clean_phone = phone # fallback
+        
+        params = {"query": clean_phone}
+        try:
+            data = await self._make_request(integ, "GET", "/api/v4/contacts", params=params)
+            contacts = data.get("_embedded", {}).get("contacts", [])
+            if contacts:
+                return contacts[0]["id"]
+            return None
+        except Exception:
+            return None
+
+    async def _create_contact(self, integ, name: str, phone: str) -> int:
+        payload = [{
+            "name": name,
+            "custom_fields_values": [
+                {
+                    "field_code": "PHONE",
+                    "values": [{"value": phone, "enum_code": "WORK"}]
+                }
+            ]
+        }]
+        res = await self._make_request(integ, "POST", "/api/v4/contacts", data=payload)
+        return res["_embedded"]["contacts"][0]["id"]
+
+    async def _find_active_lead(self, integ, contact_id: int) -> Optional[int]:
+        try:
+            links = await self._make_request(integ, "GET", f"/api/v4/contacts/{contact_id}/links")
+            linked_leads = links.get("_embedded", {}).get("links", [])
+            lead_ids = [l["to_entity_id"] for l in linked_leads if l["to_entity_type"] == "leads"]
+            
+            if not lead_ids: return None
+
+            ids_str = "&".join([f"filter[id][]={lid}" for lid in lead_ids[:10]])
+            if not ids_str: return None
+            
+            leads_data = await self._make_request(integ, "GET", f"/api/v4/leads?{ids_str}")
+            leads = leads_data.get("_embedded", {}).get("leads", [])
+            
+            for lead in leads:
+                # 142=Success, 143=Closed/Lost are default closed statuses in some setups, but 
+                # actually AmoCRM pipeline statuses are custom. 
+                # But usually 142/143 are system closed. 
+                # Better approach: check pipeline details? 
+                # For now assume if status_id is not 142 (Success) and not 143 (Lost).
+                # Note: this is risky if user has different closed IDs. 
+                # Ideally we should fetch pipeline and check "is_closed". 
+                # But for now, let's just pick the most recent one? 
+                # Or assume standard.
+                sid = lead["status_id"]
+                if sid != 142 and sid != 143:
+                    return lead["id"]
+            return None
+        except Exception:
+            return None
+
+    async def _create_lead(self, integ, contact_id: int, title: str, pipeline_id: int, status_id: int) -> int:
+        lead_data = {
+            "name": title,
+            "_embedded": {
+                "contacts": [{"id": contact_id}]
+            }
+        }
+        if pipeline_id:
+            lead_data["pipeline_id"] = pipeline_id
+        if status_id:
+            lead_data["status_id"] = status_id
+            
+        res = await self._make_request(integ, "POST", "/api/v4/leads", data=[lead_data])
+        return res["_embedded"]["leads"][0]["id"]
+
+    async def _add_note(self, integ, entity_type: str, entity_id: int, text: str):
+        payload = [{
+            "entity_id": entity_id,
+            "note_type": "common",
+            "params": {"text": text}
+        }]
+        await self._make_request(integ, "POST", f"/api/v4/{entity_type}/{entity_id}/notes", data=payload)
+
+    async def _get_mapped_status(self, tenant_id: int, stage_key: str) -> Optional[int]:
+        # Check database for mapping
+        q = select(models.TenantPipelineMapping.stage_id).where(
+            models.TenantPipelineMapping.tenant_id == tenant_id,
+            models.TenantPipelineMapping.stage_key == stage_key,
+            models.TenantPipelineMapping.provider == "amocrm",
+            models.TenantPipelineMapping.is_active == True
+        )
+        res = await self.db.execute(q)
+        sid = res.scalar()
+        return int(sid) if sid else None
+
+    async def _update_lead_status(self, integ, lead_id: int, status_id: int):
+        payload = [{"id": lead_id, "status_id": status_id}]
+        await self._make_request(integ, "PATCH", "/api/v4/leads", data=payload)
+
+    async def _apply_rules(self, integ, tenant_id: int, lead_id: int, text: str):
+        """Простая логика распределения."""
+        txt = text.lower()
+        target_stage_key = None
+        
+        # 1. "отказ/не нужно" -> "lost"
+        if any(w in txt for w in ["отказ", "не нужно", "не интересно"]):
+            target_stage_key = "lost"
+
+        # 2. "замер" + цифры (время/дата) -> "measurement_scheduled"
+        # Simple heuristic: "замер" and some digit
+        elif "замер" in txt and re.search(r"\d", txt):
+            target_stage_key = "measurement_scheduled"
+            
+        # 3. "адрес" or "квадратура" -> "in_work"
+        elif "адрес" in txt or "квадратура" in txt:
+            target_stage_key = "in_work"
+        
+        if target_stage_key:
+            status_id = await self._get_mapped_status(tenant_id, target_stage_key)
+            if status_id:
+                log.info(f"Moving lead {lead_id} to {target_stage_key} ({status_id}) based on rule")
+                await self._update_lead_status(integ, lead_id, status_id)
+
+

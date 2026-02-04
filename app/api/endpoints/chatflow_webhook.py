@@ -460,6 +460,28 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
     phone_from_jid = remote_jid.split("@")[0] if "@" in remote_jid else remote_jid
     normalized_in_message = _normalize_phone(user_text)
 
+    # --- AmoCRM Sync Integration ---
+    try:
+        if tenant and tenant.amocrm_base_domain:
+            from app.services.amocrm_service import AmoCRMService
+            amo_service = AmoCRMService(db)
+            
+            # Determine sender name 
+            push_name = data.get("data", {}).get("pushName")
+            sender_name = push_name if push_name else phone_from_jid
+            
+            sync_payload = {
+                "phone_number": phone_from_jid, 
+                "body": user_text or f"[{msg_type}]",
+                "sender_name": sender_name
+            }
+            
+            # Non-blocking sync or robust await
+            await amo_service.sync_to_amocrm(tenant, sync_payload)
+    except Exception as amo_e:
+        log.warning(f"[AMOCRM] Sync error: {type(amo_e).__name__}: {amo_e}")
+
+
     # C) Сообщение — только номер телефона (10–15 цифр, допустимы пробелы/+-/скобки): сохранить в lead, ответить один раз, НЕ сбрасывать контекст.
     _phone_only_re = re.compile(r"^[\d\s\-+()]+$")
     _stripped = (user_text or "").strip()

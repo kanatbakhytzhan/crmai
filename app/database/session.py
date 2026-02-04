@@ -619,6 +619,7 @@ async def init_db():
                     ("amocrm_base_domain", "VARCHAR(255)"),
                     ("ai_prompt", "TEXT"),
                     ("webhook_key", "VARCHAR(64)"),
+                    ("default_pipeline_id", "VARCHAR(64)"),
                 ]:
                     try:
                         async with conn.begin_nested():

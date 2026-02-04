@@ -693,6 +693,190 @@ async def disconnect_amocrm(
         return JSONResponse(status_code=500, content={"ok": False, "detail": f"Disconnect failed: {type(e).__name__}"})
 
 
+# ========== AmoCRM Pipeline/Stage Discovery ==========
+
+@router.get("/tenants/{tenant_id}/amocrm/pipelines", summary="Список воронок amoCRM", tags=["AmoCRM Discovery"])
+async def get_amocrm_pipelines(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Получить список воронок (pipelines) из подключённого AmoCRM.
+    
+    Требуется активная интеграция AmoCRM.
+    
+    Returns:
+        {ok: true, pipelines: [{id, name, is_main, sort}, ...]}
+    """
+    try:
+        await _require_tenant_access(db, tenant_id, current_user)
+    except HTTPException as e:
+        return JSONResponse(status_code=e.status_code, content={"ok": False, "detail": e.detail})
+    except Exception:
+        return JSONResponse(status_code=403, content={"ok": False, "detail": "Access denied"})
+    
+    try:
+        client = await amocrm_service.get_amocrm_client(db, tenant_id)
+        if not client:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "detail": "AmoCRM integration not connected. Please connect AmoCRM first.",
+                    "code": "NOT_CONNECTED"
+                }
+            )
+        
+        pipelines = await client.get_pipelines()
+        if pipelines is None:
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "ok": False,
+                    "detail": "Failed to fetch pipelines from AmoCRM. Check connection or try again.",
+                    "code": "AMO_API_ERROR"
+                }
+            )
+        
+        print(f"[INFO] get_amocrm_pipelines: tenant_id={tenant_id}, found {len(pipelines)} pipelines")
+        return {"ok": True, "pipelines": pipelines}
+        
+    except Exception as e:
+        print(f"[ERROR] get_amocrm_pipelines failed for tenant {tenant_id}: {type(e).__name__}: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "detail": f"Failed to fetch pipelines: {type(e).__name__}"}
+        )
+
+
+@router.get("/tenants/{tenant_id}/amocrm/pipelines/{pipeline_id}/stages", summary="Стадии воронки amoCRM", tags=["AmoCRM Discovery"])
+async def get_amocrm_pipeline_stages(
+    tenant_id: int,
+    pipeline_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Получить стадии (statuses) конкретной воронки из AmoCRM.
+    
+    Returns:
+        {ok: true, stages: [{id, name, sort, is_won, is_lost, color, type}, ...]}
+    
+    Stage types:
+        - type=0: обычная стадия
+        - type=1: Успешно реализовано (won)
+        - type=2: Закрыто и не реализовано (lost)
+    """
+    try:
+        await _require_tenant_access(db, tenant_id, current_user)
+    except HTTPException as e:
+        return JSONResponse(status_code=e.status_code, content={"ok": False, "detail": e.detail})
+    except Exception:
+        return JSONResponse(status_code=403, content={"ok": False, "detail": "Access denied"})
+    
+    try:
+        client = await amocrm_service.get_amocrm_client(db, tenant_id)
+        if not client:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "detail": "AmoCRM integration not connected",
+                    "code": "NOT_CONNECTED"
+                }
+            )
+        
+        stages = await client.get_pipeline_stages(pipeline_id)
+        if stages is None:
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "ok": False,
+                    "detail": f"Failed to fetch stages for pipeline {pipeline_id} from AmoCRM",
+                    "code": "AMO_API_ERROR"
+                }
+            )
+        
+        print(f"[INFO] get_amocrm_pipeline_stages: tenant_id={tenant_id}, pipeline_id={pipeline_id}, found {len(stages)} stages")
+        return {"ok": True, "pipeline_id": pipeline_id, "stages": stages}
+        
+    except Exception as e:
+        print(f"[ERROR] get_amocrm_pipeline_stages failed: {type(e).__name__}: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "detail": f"Failed to fetch stages: {type(e).__name__}"}
+        )
+
+
+@router.get("/tenants/{tenant_id}/amocrm/pipeline-snapshot", summary="Полная структура воронок и стадий", tags=["AmoCRM Discovery"])
+async def get_amocrm_pipeline_snapshot(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Получить полную структуру воронок и их стадий за один запрос.
+    Удобно для UI выбора стадий при маппинге.
+    
+    Returns:
+        {
+            ok: true,
+            pipelines: [{id, name, is_main, sort}, ...],
+            stages_by_pipeline: {
+                "pipeline_id": [{id, name, sort, is_won, is_lost, color}, ...]
+            }
+        }
+    """
+    try:
+        await _require_tenant_access(db, tenant_id, current_user)
+    except HTTPException as e:
+        return JSONResponse(status_code=e.status_code, content={"ok": False, "detail": e.detail})
+    except Exception:
+        return JSONResponse(status_code=403, content={"ok": False, "detail": "Access denied"})
+    
+    try:
+        client = await amocrm_service.get_amocrm_client(db, tenant_id)
+        if not client:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "detail": "AmoCRM integration not connected",
+                    "code": "NOT_CONNECTED"
+                }
+            )
+        
+        snapshot = await client.get_pipeline_snapshot()
+        if snapshot is None:
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "ok": False,
+                    "detail": "Failed to fetch pipeline structure from AmoCRM",
+                    "code": "AMO_API_ERROR"
+                }
+            )
+        
+        pipelines = snapshot.get("pipelines", [])
+        stages_by_pipeline = snapshot.get("stages_by_pipeline", {})
+        total_stages = sum(len(s) for s in stages_by_pipeline.values())
+        print(f"[INFO] get_amocrm_pipeline_snapshot: tenant_id={tenant_id}, {len(pipelines)} pipelines, {total_stages} stages total")
+        
+        return {
+            "ok": True,
+            "pipelines": pipelines,
+            "stages_by_pipeline": stages_by_pipeline
+        }
+        
+    except Exception as e:
+        print(f"[ERROR] get_amocrm_pipeline_snapshot failed: {type(e).__name__}: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "detail": f"Failed to fetch snapshot: {type(e).__name__}"}
+        )
+
+
 # ========== Combined Mapping Endpoint ==========
 
 @router.get("/tenants/{tenant_id}/amocrm/mapping", summary="Все маппинги amoCRM (pipeline + field)")
@@ -871,6 +1055,20 @@ async def tenant_snapshot(
             pipeline_mappings = []
             field_mappings = []
         
+        # Get first WhatsApp account details if exists
+        wa_phone = None
+        wa_instance_id = None
+        wa_token_masked = None
+        if wa_accounts:
+            first_wa = wa_accounts[0]
+            wa_phone = getattr(first_wa, "phone_number", None)
+            wa_instance_id = getattr(first_wa, "chatflow_instance_id", None)
+            wa_token_masked = getattr(first_wa, "chatflow_token_masked", None)
+        
+        # AI prompt details
+        ai_prompt_raw = tenant_data.get("ai_prompt") or ""
+        ai_prompt_preview = ai_prompt_raw[:100] + "..." if len(ai_prompt_raw) > 100 else ai_prompt_raw
+        
         return {
             "ok": True,
             "tenant_id": tenant_id,
@@ -879,18 +1077,26 @@ async def tenant_snapshot(
                 "whatsapp_source": tenant_data.get("whatsapp_source", "chatflow"),
                 "ai_enabled_global": tenant_data.get("ai_enabled_global", True),
                 "ai_enabled": tenant_data.get("ai_enabled", True),
-                "ai_prompt_len": len(tenant_data.get("ai_prompt") or ""),
+                "ai_prompt_len": len(ai_prompt_raw),
+                "ai_prompt_preview": ai_prompt_preview,
+                "ai_prompt_is_set": bool(ai_prompt_raw.strip()),
                 "ai_after_lead_submitted_behavior": tenant_data.get("ai_after_lead_submitted_behavior", "polite_close"),
+                "amocrm_base_domain": tenant_data.get("amocrm_base_domain"),
+                "webhook_key": tenant_data.get("webhook_key"),
             },
             "whatsapp": {
                 "binding_exists": wa_binding,
                 "is_active": wa_active,
                 "accounts_count": len(wa_accounts) if wa_accounts else 0,
+                "phone_number": wa_phone,
+                "chatflow_instance_id": wa_instance_id,
+                "chatflow_token_masked": wa_token_masked,
             },
             "amocrm": {
                 "connected": amo_connected,
                 "is_active": amo_integration.is_active if amo_integration else False,
                 "base_domain": amo_integration.base_domain if amo_integration else None,
+                "base_domain_from_settings": tenant_data.get("amocrm_base_domain"),
                 "token_expires_at": amo_integration.token_expires_at.isoformat() if amo_integration and amo_integration.token_expires_at else None,
             },
             "mappings": {

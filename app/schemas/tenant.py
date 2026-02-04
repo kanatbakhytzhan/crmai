@@ -131,6 +131,41 @@ class AmoCRMStatusResponse(BaseModel):
 
 # ========== Universal Admin Console: Pipeline Mappings ==========
 
+# Extended stage keys for AmoCRM mapping
+# These cover common CRM stages including user's AmoCRM pipeline
+STAGE_KEYS = [
+    # Basic stages
+    "UNREAD",           # Неразобранные / unsorted
+    "UNSORTED",         # Неразобранные (alias)
+    "NEW",              # Новые
+    "IN_WORK",          # В работе
+    
+    # Call stages
+    "CALL_1",           # 1-й звонок
+    "CALL_2",           # 2-й звонок  
+    "CALL_3",           # 3-й звонок
+    
+    # Special stages
+    "REPAIR_NOT_READY", # Ремонт не готов
+    "OTHER_CITY",       # Другой город
+    "IGNORE",           # Игнор
+    
+    # Measurement stages
+    "MEASUREMENT_ASSIGNED",     # Назначен замер
+    "MEASUREMENT_DONE",         # Провел замер
+    "AFTER_MEASUREMENT_REJECT", # Отказ после замера
+    
+    # System stages
+    "WON",              # Успешно реализовано
+    "LOST",             # Закрыто и не реализовано
+    
+    # Custom stages (for flexibility)
+    "CUSTOM_1",
+    "CUSTOM_2",
+    "CUSTOM_3",
+]
+
+
 class PipelineMappingItem(BaseModel):
     stage_key: str
     stage_id: Optional[str] = None

@@ -184,6 +184,81 @@ class AmoCRMClient:
         data = await self._request("PATCH", f"/leads/{lead_id}", json=body)
         return data
 
+    # ========== Pipeline/Stage Discovery ==========
+
+    async def get_pipelines(self) -> list[dict] | None:
+        """
+        Получить список воронок (pipelines) из AmoCRM.
+        Returns: [{"id": 123, "name": "Продажи", "is_main": true, "sort": 0}, ...]
+        """
+        data = await self._request("GET", "/leads/pipelines")
+        if not data or not isinstance(data, dict):
+            return None
+        embedded = data.get("_embedded", {})
+        pipelines = embedded.get("pipelines", [])
+        result = []
+        for p in pipelines:
+            result.append({
+                "id": p.get("id"),
+                "name": p.get("name", ""),
+                "is_main": p.get("is_main", False),
+                "sort": p.get("sort", 0),
+            })
+        return result
+
+    async def get_pipeline_stages(self, pipeline_id: int) -> list[dict] | None:
+        """
+        Получить стадии воронки по её ID.
+        Returns: [{"id": 456, "name": "Новые", "sort": 10, "is_won": false, "is_lost": false, "color": "#fff"}, ...]
+        
+        AmoCRM system stages:
+        - 142 = Won (Успешно реализовано)
+        - 143 = Lost (Закрыто и не реализовано)
+        """
+        data = await self._request("GET", f"/leads/pipelines/{pipeline_id}")
+        if not data or not isinstance(data, dict):
+            return None
+        embedded = data.get("_embedded", {})
+        statuses = embedded.get("statuses", [])
+        result = []
+        for s in statuses:
+            status_id = s.get("id", 0)
+            # System stages detection
+            is_won = (status_id == 142) or s.get("type") == 1
+            is_lost = (status_id == 143) or s.get("type") == 2
+            result.append({
+                "id": status_id,
+                "name": s.get("name", ""),
+                "sort": s.get("sort", 0),
+                "is_won": is_won,
+                "is_lost": is_lost,
+                "color": s.get("color", ""),
+                "type": s.get("type", 0),  # 0=normal, 1=won, 2=lost
+            })
+        return result
+
+    async def get_pipeline_snapshot(self) -> dict | None:
+        """
+        Получить полную структуру воронок и стадий за один запрос.
+        Returns: {"pipelines": [...], "stages_by_pipeline": {pipeline_id: [...]}}
+        """
+        pipelines = await self.get_pipelines()
+        if pipelines is None:
+            return None
+        
+        stages_by_pipeline = {}
+        for p in pipelines:
+            pipeline_id = p.get("id")
+            if pipeline_id:
+                stages = await self.get_pipeline_stages(pipeline_id)
+                if stages:
+                    stages_by_pipeline[str(pipeline_id)] = stages
+        
+        return {
+            "pipelines": pipelines,
+            "stages_by_pipeline": stages_by_pipeline,
+        }
+
 
 async def get_amocrm_client(db: AsyncSession, tenant_id: int) -> AmoCRMClient | None:
     """Создать клиент AmoCRM если интеграция активна."""

@@ -1596,13 +1596,14 @@ async def list_whatsapp_accounts_by_tenant(
 async def get_chatflow_binding_snapshot(db: AsyncSession, tenant_id: int) -> dict:
     """
     Get ChatFlow binding snapshot for tenant settings response.
-    Returns dict with is_active, phone_number, chatflow_instance_id, chatflow_token_masked, binding_exists.
+    Returns dict with is_active, phone_number, chatflow_instance_id, chatflow_token_masked, binding_exists, accounts_count.
     """
     accounts = await list_whatsapp_accounts_by_tenant(db, tenant_id)
     if not accounts:
         return {
             "binding_exists": False,
             "is_active": False,
+            "accounts_count": 0,
             "phone_number": None,
             "chatflow_instance_id": None,
             "chatflow_token_masked": None,
@@ -1620,6 +1621,7 @@ async def get_chatflow_binding_snapshot(db: AsyncSession, tenant_id: int) -> dic
     return {
         "binding_exists": True,
         "is_active": acc.is_active,
+        "accounts_count": len(accounts),
         "phone_number": acc.phone_number or None,
         "chatflow_instance_id": getattr(acc, "chatflow_instance_id", None),
         "chatflow_token_masked": token_masked,

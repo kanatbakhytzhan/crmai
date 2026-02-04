@@ -49,6 +49,7 @@ class ChatFlowBindingSnapshot(BaseModel):
     """Snapshot of ChatFlow binding for tenant settings response."""
     binding_exists: bool = False
     is_active: bool = False
+    accounts_count: int = 0
     phone_number: Optional[str] = None
     chatflow_instance_id: Optional[str] = None
     chatflow_token_masked: Optional[str] = None
@@ -57,22 +58,38 @@ class ChatFlowBindingSnapshot(BaseModel):
 class AmoCRMSnapshot(BaseModel):
     """Snapshot of AmoCRM integration status for tenant settings response."""
     connected: bool = False
-    is_active: bool = False
     base_domain: Optional[str] = None
-    token_expires_at: Optional[datetime] = None
+    expires_at: Optional[str] = None  # ISO string or null
+
+
+class TenantSettingsBlock(BaseModel):
+    """Settings block inside TenantSettingsResponse."""
+    whatsapp_source: str = "chatflow"
+    ai_enabled_global: bool = True
+    ai_prompt: str = ""  # Never null - empty string if not set
+    ai_prompt_len: int = 0
+    ai_after_lead_submitted_behavior: str = "polite_close"
+    amocrm_base_domain: Optional[str] = None
+
+
+class MappingsSnapshot(BaseModel):
+    """Mappings counts for tenant settings response."""
+    pipeline_count: int = 0
+    field_count: int = 0
 
 
 class TenantSettingsResponse(BaseModel):
-    """GET /api/admin/tenants/{id}/settings - comprehensive response with all settings and snapshots."""
-    # Core settings
-    whatsapp_source: str = "chatflow"
-    ai_enabled_global: bool = True
-    ai_prompt: Optional[str] = None
-    ai_after_lead_submitted_behavior: str = "polite_close"
-    amocrm_base_domain: Optional[str] = None
-    # Snapshots for frontend
-    whatsapp: Optional[ChatFlowBindingSnapshot] = None
-    amocrm: Optional[AmoCRMSnapshot] = None
+    """
+    GET /api/admin/tenants/{id}/settings - comprehensive response with all settings and snapshots.
+    ALWAYS returns complete structure with defaults - never missing keys.
+    """
+    ok: bool = True
+    tenant_id: int = 0
+    tenant_name: str = ""
+    settings: TenantSettingsBlock = Field(default_factory=TenantSettingsBlock)
+    whatsapp: ChatFlowBindingSnapshot = Field(default_factory=ChatFlowBindingSnapshot)
+    amocrm: AmoCRMSnapshot = Field(default_factory=AmoCRMSnapshot)
+    mappings: MappingsSnapshot = Field(default_factory=MappingsSnapshot)
 
 
 class TenantSettingsUpdate(BaseModel):
@@ -82,6 +99,12 @@ class TenantSettingsUpdate(BaseModel):
     ai_prompt: Optional[str] = None
     ai_after_lead_submitted_behavior: Optional[str] = None
     amocrm_base_domain: Optional[str] = None
+
+
+class TenantSettingsErrorResponse(BaseModel):
+    """Error response for /settings endpoint."""
+    ok: bool = False
+    detail: str = "Unknown error"
 
 
 # ========== Universal Admin Console: AmoCRM ==========

@@ -2,7 +2,9 @@
 Universal Admin Console API endpoints.
 Tenant settings, AmoCRM connect, pipeline/field mappings, mute from lead, diagnostics.
 """
+import traceback
 from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, get_current_user, get_current_admin_or_owner_or_rop
@@ -11,8 +13,10 @@ from app.database.models import User
 from app.schemas.tenant import (
     TenantSettingsResponse,
     TenantSettingsUpdate,
+    TenantSettingsBlock,
     ChatFlowBindingSnapshot,
     AmoCRMSnapshot,
+    MappingsSnapshot,
     AmoCRMAuthUrlResponse,
     AmoCRMCallbackBody,
     AmoCRMStatusResponse,
@@ -31,6 +35,14 @@ router = APIRouter()
 integrations_router = APIRouter()
 
 
+def _safe_json_error(detail: str, status_code: int = 500) -> JSONResponse:
+    """Return a safe JSON error response."""
+    return JSONResponse(
+        status_code=status_code,
+        content={"ok": False, "detail": str(detail)[:500]}
+    )
+
+
 async def _require_tenant_access(db: AsyncSession, tenant_id: int, current_user: User) -> str:
     """Проверка доступа: admin или owner/rop в tenant. Возвращает роль."""
     if getattr(current_user, "is_admin", False):
@@ -43,7 +55,79 @@ async def _require_tenant_access(db: AsyncSession, tenant_id: int, current_user:
 
 # ========== Tenant Settings ==========
 
-@router.get("/tenants/{tenant_id}/settings", response_model=TenantSettingsResponse, summary="Настройки tenant для Universal Admin")
+async def _build_tenant_settings_response(db: AsyncSession, tenant_id: int, tenant) -> TenantSettingsResponse:
+    """Build a complete TenantSettingsResponse with all fields and safe defaults."""
+    # Settings block
+    ai_prompt_raw = getattr(tenant, "ai_prompt", None) or ""
+    settings = TenantSettingsBlock(
+        whatsapp_source=getattr(tenant, "whatsapp_source", "chatflow") or "chatflow",
+        ai_enabled_global=getattr(tenant, "ai_enabled_global", True) if hasattr(tenant, "ai_enabled_global") else True,
+        ai_prompt=ai_prompt_raw,
+        ai_prompt_len=len(ai_prompt_raw),
+        ai_after_lead_submitted_behavior=getattr(tenant, "ai_after_lead_submitted_behavior", "polite_close") or "polite_close",
+        amocrm_base_domain=getattr(tenant, "amocrm_base_domain", None),
+    )
+    
+    # WhatsApp snapshot
+    try:
+        whatsapp_snapshot_dict = await crud.get_chatflow_binding_snapshot(db, tenant_id)
+        whatsapp_snapshot = ChatFlowBindingSnapshot(
+            binding_exists=whatsapp_snapshot_dict.get("binding_exists", False),
+            is_active=whatsapp_snapshot_dict.get("is_active", False),
+            accounts_count=whatsapp_snapshot_dict.get("accounts_count", 0) if "accounts_count" in whatsapp_snapshot_dict else (1 if whatsapp_snapshot_dict.get("binding_exists") else 0),
+            phone_number=whatsapp_snapshot_dict.get("phone_number"),
+            chatflow_instance_id=whatsapp_snapshot_dict.get("chatflow_instance_id"),
+            chatflow_token_masked=whatsapp_snapshot_dict.get("chatflow_token_masked"),
+        )
+    except Exception as e:
+        print(f"[WARN] Failed to get whatsapp snapshot for tenant {tenant_id}: {e}")
+        whatsapp_snapshot = ChatFlowBindingSnapshot()
+    
+    # AmoCRM snapshot
+    try:
+        integration = await crud.get_tenant_integration(db, tenant_id, "amocrm")
+        if integration:
+            expires_at_str = None
+            if integration.token_expires_at:
+                try:
+                    expires_at_str = integration.token_expires_at.isoformat()
+                except Exception:
+                    expires_at_str = str(integration.token_expires_at)
+            amocrm_snapshot = AmoCRMSnapshot(
+                connected=bool(integration.access_token and integration.is_active),
+                base_domain=integration.base_domain,
+                expires_at=expires_at_str,
+            )
+        else:
+            amocrm_snapshot = AmoCRMSnapshot()
+    except Exception as e:
+        print(f"[WARN] Failed to get amocrm snapshot for tenant {tenant_id}: {e}")
+        amocrm_snapshot = AmoCRMSnapshot()
+    
+    # Mappings snapshot
+    try:
+        pipeline_mappings = await crud.list_pipeline_mappings(db, tenant_id, "amocrm")
+        field_mappings = await crud.list_field_mappings(db, tenant_id, "amocrm")
+        mappings_snapshot = MappingsSnapshot(
+            pipeline_count=len(pipeline_mappings) if pipeline_mappings else 0,
+            field_count=len(field_mappings) if field_mappings else 0,
+        )
+    except Exception as e:
+        print(f"[WARN] Failed to get mappings for tenant {tenant_id}: {e}")
+        mappings_snapshot = MappingsSnapshot()
+    
+    return TenantSettingsResponse(
+        ok=True,
+        tenant_id=tenant_id,
+        tenant_name=tenant.name or "",
+        settings=settings,
+        whatsapp=whatsapp_snapshot,
+        amocrm=amocrm_snapshot,
+        mappings=mappings_snapshot,
+    )
+
+
+@router.get("/tenants/{tenant_id}/settings", summary="Настройки tenant для Universal Admin")
 async def get_tenant_settings(
     tenant_id: int,
     db: AsyncSession = Depends(get_db),
@@ -51,42 +135,35 @@ async def get_tenant_settings(
 ):
     """
     Получить настройки tenant со снапшотами WhatsApp и AmoCRM.
-    Включает: whatsapp_source, ai_enabled_global, ai_prompt, ai_after_lead_submitted_behavior, amocrm_base_domain.
-    Плюс: whatsapp (ChatFlow binding snapshot), amocrm (integration status snapshot).
+    ALWAYS returns complete structure with ok:true/false.
     """
-    await _require_tenant_access(db, tenant_id, current_user)
-    tenant = await crud.get_tenant_by_id(db, tenant_id)
-    if not tenant:
-        return {"ok": False, "detail": "Tenant not found"}
+    try:
+        await _require_tenant_access(db, tenant_id, current_user)
+    except HTTPException as e:
+        return _safe_json_error(e.detail, e.status_code)
+    except Exception as e:
+        print(f"[ERROR] get_tenant_settings access check failed: {e}")
+        return _safe_json_error("Access check failed", 403)
     
-    # Get ChatFlow binding snapshot
-    whatsapp_snapshot_dict = await crud.get_chatflow_binding_snapshot(db, tenant_id)
-    whatsapp_snapshot = ChatFlowBindingSnapshot(**whatsapp_snapshot_dict)
-    
-    # Get AmoCRM integration snapshot
-    integration = await crud.get_tenant_integration(db, tenant_id, "amocrm")
-    if integration:
-        amocrm_snapshot = AmoCRMSnapshot(
-            connected=bool(integration.access_token),
-            is_active=integration.is_active,
-            base_domain=integration.base_domain,
-            token_expires_at=integration.token_expires_at,
-        )
-    else:
-        amocrm_snapshot = AmoCRMSnapshot()
-    
-    return TenantSettingsResponse(
-        whatsapp_source=getattr(tenant, "whatsapp_source", "chatflow") or "chatflow",
-        ai_enabled_global=getattr(tenant, "ai_enabled_global", True),
-        ai_prompt=getattr(tenant, "ai_prompt", None),
-        ai_after_lead_submitted_behavior=getattr(tenant, "ai_after_lead_submitted_behavior", "polite_close") or "polite_close",
-        amocrm_base_domain=getattr(tenant, "amocrm_base_domain", None),
-        whatsapp=whatsapp_snapshot,
-        amocrm=amocrm_snapshot,
-    )
+    try:
+        tenant = await crud.get_tenant_by_id(db, tenant_id)
+        if not tenant:
+            return JSONResponse(
+                status_code=404,
+                content={"ok": False, "detail": f"Tenant {tenant_id} not found"}
+            )
+        
+        print(f"[INFO] get_tenant_settings: tenant_id={tenant_id}, name={tenant.name}")
+        response = await _build_tenant_settings_response(db, tenant_id, tenant)
+        return response
+        
+    except Exception as e:
+        print(f"[ERROR] get_tenant_settings failed for tenant {tenant_id}: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return _safe_json_error(f"Failed to load settings: {type(e).__name__}")
 
 
-@router.patch("/tenants/{tenant_id}/settings", response_model=TenantSettingsResponse, summary="Обновить настройки tenant")
+@router.patch("/tenants/{tenant_id}/settings", summary="Обновить настройки tenant")
 async def update_tenant_settings(
     tenant_id: int,
     body: TenantSettingsUpdate,
@@ -97,49 +174,39 @@ async def update_tenant_settings(
     Обновить настройки tenant.
     Поддерживает: whatsapp_source, ai_enabled_global, ai_prompt, ai_after_lead_submitted_behavior, amocrm_base_domain.
     """
-    await _require_tenant_access(db, tenant_id, current_user)
-    tenant = await crud.update_tenant(
-        db,
-        tenant_id,
-        whatsapp_source=body.whatsapp_source,
-        ai_enabled_global=body.ai_enabled_global,
-        ai_prompt=body.ai_prompt,
-        ai_after_lead_submitted_behavior=body.ai_after_lead_submitted_behavior,
-        amocrm_base_domain=body.amocrm_base_domain,
-    )
-    if not tenant:
-        return {"ok": False, "detail": "Tenant not found"}
+    try:
+        await _require_tenant_access(db, tenant_id, current_user)
+    except HTTPException as e:
+        return _safe_json_error(e.detail, e.status_code)
+    except Exception as e:
+        return _safe_json_error("Access check failed", 403)
     
-    # Get ChatFlow binding snapshot
-    whatsapp_snapshot_dict = await crud.get_chatflow_binding_snapshot(db, tenant_id)
-    whatsapp_snapshot = ChatFlowBindingSnapshot(**whatsapp_snapshot_dict)
-    
-    # Get AmoCRM integration snapshot
-    integration = await crud.get_tenant_integration(db, tenant_id, "amocrm")
-    if integration:
-        amocrm_snapshot = AmoCRMSnapshot(
-            connected=bool(integration.access_token),
-            is_active=integration.is_active,
-            base_domain=integration.base_domain,
-            token_expires_at=integration.token_expires_at,
+    try:
+        tenant = await crud.update_tenant(
+            db,
+            tenant_id,
+            whatsapp_source=body.whatsapp_source,
+            ai_enabled_global=body.ai_enabled_global,
+            ai_prompt=body.ai_prompt,
+            ai_after_lead_submitted_behavior=body.ai_after_lead_submitted_behavior,
+            amocrm_base_domain=body.amocrm_base_domain,
         )
-    else:
-        amocrm_snapshot = AmoCRMSnapshot()
-    
-    return TenantSettingsResponse(
-        whatsapp_source=getattr(tenant, "whatsapp_source", "chatflow") or "chatflow",
-        ai_enabled_global=getattr(tenant, "ai_enabled_global", True),
-        ai_prompt=getattr(tenant, "ai_prompt", None),
-        ai_after_lead_submitted_behavior=getattr(tenant, "ai_after_lead_submitted_behavior", "polite_close") or "polite_close",
-        amocrm_base_domain=getattr(tenant, "amocrm_base_domain", None),
-        whatsapp=whatsapp_snapshot,
-        amocrm=amocrm_snapshot,
-    )
+        if not tenant:
+            return JSONResponse(status_code=404, content={"ok": False, "detail": "Tenant not found"})
+        
+        print(f"[INFO] update_tenant_settings: tenant_id={tenant_id}, updated fields={body.model_dump(exclude_unset=True)}")
+        response = await _build_tenant_settings_response(db, tenant_id, tenant)
+        return response
+        
+    except Exception as e:
+        print(f"[ERROR] update_tenant_settings failed for tenant {tenant_id}: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return _safe_json_error(f"Failed to update settings: {type(e).__name__}")
 
 
 # ========== AmoCRM Integration ==========
 
-@router.get("/tenants/{tenant_id}/amocrm/auth-url", response_model=AmoCRMAuthUrlResponse, summary="URL для OAuth в amoCRM")
+@router.get("/tenants/{tenant_id}/amocrm/auth-url", summary="URL для OAuth в amoCRM")
 async def get_amocrm_auth_url(
     tenant_id: int,
     base_domain: str = Query(None, description="Домен amoCRM (опционально если уже сохранён в настройках), например baxa.amocrm.ru"),
@@ -153,50 +220,111 @@ async def get_amocrm_auth_url(
     - Иначе берётся из tenant.amocrm_base_domain
     - Если нигде не задан — возвращается 422 с понятной ошибкой
     - Домен валидируется: только *.amocrm.ru или *.kommo.com
+    
+    Returns: {ok: true, auth_url: "...", base_domain: "..."} or {ok: false, detail: "...", code: "..."}
     """
-    await _require_tenant_access(db, tenant_id, current_user)
+    import re
+    
+    try:
+        await _require_tenant_access(db, tenant_id, current_user)
+    except HTTPException as e:
+        return JSONResponse(status_code=e.status_code, content={"ok": False, "detail": e.detail})
+    except Exception:
+        return JSONResponse(status_code=403, content={"ok": False, "detail": "Access denied"})
+    
+    print(f"[INFO] get_amocrm_auth_url: tenant_id={tenant_id}, base_domain_query={base_domain}")
+    
+    # Check ENV variables first
+    from app.core.config import get_settings
+    settings = get_settings()
+    amo_client_id = getattr(settings, "amo_client_id", None)
+    amo_client_secret = getattr(settings, "amo_client_secret", None)
+    amo_redirect_url = getattr(settings, "amo_redirect_url", None)
+    
+    missing_env = []
+    if not amo_client_id:
+        missing_env.append("AMO_CLIENT_ID")
+    if not amo_client_secret:
+        missing_env.append("AMO_CLIENT_SECRET")
+    if not amo_redirect_url:
+        missing_env.append("AMO_REDIRECT_URL")
+    
+    if missing_env:
+        print(f"[ERROR] AmoCRM OAuth ENV missing: {missing_env}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "detail": f"Server configuration error: missing {', '.join(missing_env)}. Contact administrator.",
+                "code": "ENV_MISSING"
+            }
+        )
     
     # Determine base_domain: from query or from tenant settings
-    domain = (base_domain or "").strip()
+    domain = (base_domain or "").strip().lower()
     if not domain:
-        tenant = await crud.get_tenant_by_id(db, tenant_id)
-        if tenant:
-            domain = getattr(tenant, "amocrm_base_domain", None) or ""
+        try:
+            tenant = await crud.get_tenant_by_id(db, tenant_id)
+            if tenant:
+                domain = (getattr(tenant, "amocrm_base_domain", None) or "").strip().lower()
+        except Exception as e:
+            print(f"[WARN] Failed to get tenant for domain: {e}")
     
-    # Normalize domain
-    domain = domain.strip()
+    # Normalize domain - strip protocol and trailing slash
     if domain.startswith("https://"):
         domain = domain[8:]
     elif domain.startswith("http://"):
         domain = domain[7:]
-    domain = domain.rstrip("/")
+    domain = domain.rstrip("/").lower()
     
     if not domain:
-        return AmoCRMAuthUrlResponse(
-            ok=False,
-            detail="base_domain is required. Provide ?base_domain=xxx.amocrm.ru or save it in tenant settings first."
+        return JSONResponse(
+            status_code=422,
+            content={
+                "ok": False,
+                "detail": "base_domain is required. Example: baxa.amocrm.ru",
+                "code": "BASE_DOMAIN_REQUIRED"
+            }
         )
     
     # Validate domain format
-    import re
     if not re.match(r"^[\w\-]+\.(amocrm\.ru|kommo\.com)$", domain, re.IGNORECASE):
-        return AmoCRMAuthUrlResponse(
-            ok=False,
-            detail=f"Invalid base_domain format: '{domain}'. Must be like 'company.amocrm.ru' or 'company.kommo.com'"
+        return JSONResponse(
+            status_code=422,
+            content={
+                "ok": False,
+                "detail": f"Invalid base_domain format: '{domain}'. Must be like 'company.amocrm.ru' or 'company.kommo.com'",
+                "code": "INVALID_DOMAIN_FORMAT"
+            }
         )
     
     # Build auth URL
-    url = amocrm_service.build_auth_url(tenant_id, domain)
-    if not url:
-        return AmoCRMAuthUrlResponse(
-            ok=False,
-            detail="AMO_CLIENT_ID or AMO_REDIRECT_URL not configured on server. Contact administrator."
+    try:
+        url = amocrm_service.build_auth_url(tenant_id, domain)
+        if not url:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "ok": False,
+                    "detail": "Failed to build auth URL. Check server configuration.",
+                    "code": "BUILD_URL_FAILED"
+                }
+            )
+    except Exception as e:
+        print(f"[ERROR] build_auth_url failed: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "detail": f"Failed to build auth URL: {type(e).__name__}"}
         )
     
     # Save domain to tenant settings for future use
-    await crud.update_tenant(db, tenant_id, amocrm_base_domain=domain)
+    try:
+        await crud.update_tenant(db, tenant_id, amocrm_base_domain=domain)
+    except Exception as e:
+        print(f"[WARN] Failed to save amocrm_base_domain: {e}")
     
-    return AmoCRMAuthUrlResponse(ok=True, auth_url=url, base_domain=domain)
+    print(f"[INFO] AmoCRM auth URL generated for tenant {tenant_id}, domain={domain}")
+    return {"ok": True, "auth_url": url, "base_domain": domain}
 
 
 @router.post("/tenants/{tenant_id}/amocrm/callback", summary="Обмен code на токены amoCRM")
@@ -207,32 +335,65 @@ async def amocrm_callback(
     current_user: User = Depends(get_current_user),
 ):
     """Обменять code на access_token/refresh_token и сохранить."""
-    await _require_tenant_access(db, tenant_id, current_user)
-    result = await amocrm_service.exchange_code_for_tokens(db, tenant_id, body.base_domain, body.code)
-    if not result:
-        return {"ok": False, "detail": "Failed to exchange code for tokens. Check server logs."}
-    # Also save base_domain to tenant settings
-    await crud.update_tenant(db, tenant_id, amocrm_base_domain=body.base_domain)
-    return {"ok": True, **result}
+    try:
+        await _require_tenant_access(db, tenant_id, current_user)
+    except HTTPException as e:
+        return JSONResponse(status_code=e.status_code, content={"ok": False, "detail": e.detail})
+    except Exception:
+        return JSONResponse(status_code=403, content={"ok": False, "detail": "Access denied"})
+    
+    try:
+        result = await amocrm_service.exchange_code_for_tokens(db, tenant_id, body.base_domain, body.code)
+        if not result:
+            return JSONResponse(status_code=400, content={"ok": False, "detail": "Failed to exchange code for tokens. Check server logs."})
+        # Also save base_domain to tenant settings
+        await crud.update_tenant(db, tenant_id, amocrm_base_domain=body.base_domain)
+        return {"ok": True, **result}
+    except Exception as e:
+        print(f"[ERROR] amocrm_callback failed for tenant {tenant_id}: {e}")
+        return JSONResponse(status_code=500, content={"ok": False, "detail": f"Token exchange failed: {type(e).__name__}"})
 
 
-@router.get("/tenants/{tenant_id}/amocrm/status", response_model=AmoCRMStatusResponse, summary="Статус интеграции amoCRM")
+@router.get("/tenants/{tenant_id}/amocrm/status", summary="Статус интеграции amoCRM")
 async def get_amocrm_status(
     tenant_id: int,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Статус интеграции amoCRM (без токенов)."""
-    await _require_tenant_access(db, tenant_id, current_user)
-    integration = await crud.get_tenant_integration(db, tenant_id, "amocrm")
-    if not integration:
-        return AmoCRMStatusResponse(is_active=False, connected=False)
-    return AmoCRMStatusResponse(
-        is_active=integration.is_active,
-        base_domain=integration.base_domain,
-        token_expires_at=integration.token_expires_at,
-        connected=bool(integration.access_token),
-    )
+    """Статус интеграции amoCRM (без токенов). Returns same shape as amocrm block in /settings."""
+    try:
+        await _require_tenant_access(db, tenant_id, current_user)
+    except HTTPException as e:
+        return JSONResponse(status_code=e.status_code, content={"ok": False, "detail": e.detail})
+    except Exception:
+        return JSONResponse(status_code=403, content={"ok": False, "detail": "Access denied"})
+    
+    try:
+        integration = await crud.get_tenant_integration(db, tenant_id, "amocrm")
+        if not integration:
+            return {
+                "ok": True,
+                "connected": False,
+                "base_domain": None,
+                "expires_at": None
+            }
+        
+        expires_at_str = None
+        if integration.token_expires_at:
+            try:
+                expires_at_str = integration.token_expires_at.isoformat()
+            except Exception:
+                expires_at_str = str(integration.token_expires_at)
+        
+        return {
+            "ok": True,
+            "connected": bool(integration.access_token and integration.is_active),
+            "base_domain": integration.base_domain,
+            "expires_at": expires_at_str
+        }
+    except Exception as e:
+        print(f"[ERROR] get_amocrm_status failed for tenant {tenant_id}: {e}")
+        return JSONResponse(status_code=500, content={"ok": False, "detail": f"Failed to get status: {type(e).__name__}"})
 
 
 @router.post("/tenants/{tenant_id}/amocrm/refresh", summary="Принудительно обновить токены amoCRM")
@@ -242,12 +403,22 @@ async def refresh_amocrm_tokens(
     current_user: User = Depends(get_current_user),
 ):
     """Принудительно обновить токены amoCRM."""
-    await _require_tenant_access(db, tenant_id, current_user)
-    client = await amocrm_service.get_amocrm_client(db, tenant_id)
-    if not client:
-        return {"ok": False, "detail": "AmoCRM integration not active or not connected"}
-    refreshed = await client._refresh_if_needed()
-    return {"ok": True, "refreshed": refreshed}
+    try:
+        await _require_tenant_access(db, tenant_id, current_user)
+    except HTTPException as e:
+        return JSONResponse(status_code=e.status_code, content={"ok": False, "detail": e.detail})
+    except Exception:
+        return JSONResponse(status_code=403, content={"ok": False, "detail": "Access denied"})
+    
+    try:
+        client = await amocrm_service.get_amocrm_client(db, tenant_id)
+        if not client:
+            return JSONResponse(status_code=400, content={"ok": False, "detail": "AmoCRM integration not active or not connected"})
+        refreshed = await client._refresh_if_needed()
+        return {"ok": True, "refreshed": refreshed}
+    except Exception as e:
+        print(f"[ERROR] refresh_amocrm_tokens failed for tenant {tenant_id}: {e}")
+        return JSONResponse(status_code=500, content={"ok": False, "detail": f"Refresh failed: {type(e).__name__}"})
 
 
 @router.post("/tenants/{tenant_id}/amocrm/disconnect", summary="Отключить интеграцию amoCRM")
@@ -257,9 +428,19 @@ async def disconnect_amocrm(
     current_user: User = Depends(get_current_user),
 ):
     """Деактивировать интеграцию amoCRM."""
-    await _require_tenant_access(db, tenant_id, current_user)
-    result = await crud.deactivate_tenant_integration(db, tenant_id, "amocrm")
-    return {"ok": result}
+    try:
+        await _require_tenant_access(db, tenant_id, current_user)
+    except HTTPException as e:
+        return JSONResponse(status_code=e.status_code, content={"ok": False, "detail": e.detail})
+    except Exception:
+        return JSONResponse(status_code=403, content={"ok": False, "detail": "Access denied"})
+    
+    try:
+        result = await crud.deactivate_tenant_integration(db, tenant_id, "amocrm")
+        return {"ok": result}
+    except Exception as e:
+        print(f"[ERROR] disconnect_amocrm failed for tenant {tenant_id}: {e}")
+        return JSONResponse(status_code=500, content={"ok": False, "detail": f"Disconnect failed: {type(e).__name__}"})
 
 
 # ========== Pipeline Mappings ==========

@@ -270,6 +270,62 @@ async def debug_cors(request: Request):
     }
 
 
+@app.get("/api/debug/auth", summary="Debug auth token", tags=["Debug"])
+async def debug_auth(request: Request):
+    """
+    Debug endpoint to verify if Authorization header is being sent correctly.
+    
+    This endpoint does NOT require auth - it just reports what auth info was received.
+    Useful for debugging "Not authenticated" errors from frontend.
+    """
+    from app.core.security import decode_access_token
+    
+    auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
+    
+    result = {
+        "ok": True,
+        "auth_header_present": bool(auth_header),
+        "auth_header_value": None,
+        "token_extracted": False,
+        "token_valid": False,
+        "token_email": None,
+        "error": None,
+    }
+    
+    if not auth_header:
+        result["error"] = "No Authorization header found"
+        return result
+    
+    # Check format
+    if not auth_header.startswith("Bearer "):
+        result["auth_header_value"] = auth_header[:20] + "..." if len(auth_header) > 20 else auth_header
+        result["error"] = "Authorization header must start with 'Bearer '"
+        return result
+    
+    token = auth_header[7:]  # Remove "Bearer " prefix
+    result["token_extracted"] = True
+    result["auth_header_value"] = f"Bearer {token[:10]}...{token[-5:]}" if len(token) > 15 else f"Bearer {token}"
+    
+    # Try to decode
+    try:
+        email = decode_access_token(token)
+        if email:
+            result["token_valid"] = True
+            result["token_email"] = email
+        else:
+            result["error"] = "Token decode returned None (invalid or expired)"
+    except Exception as e:
+        result["error"] = f"Token decode error: {type(e).__name__}"
+    
+    return result
+
+
+@app.post("/api/debug/auth", summary="Debug auth token (POST)", tags=["Debug"])
+async def debug_auth_post(request: Request):
+    """Same as GET but allows POST (for preflight testing)."""
+    return await debug_auth(request)
+
+
 def _collect_api_routes():
     """Routes starting with /api/auth or /api/leads (for diagnostics)."""
     out = []

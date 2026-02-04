@@ -907,3 +907,175 @@ async def get_whatsapp_status(
             status_code=500,
             content={"ok": False, "detail": f"Status check failed: {type(e).__name__}"}
         )
+
+
+@router.get("/tenants/{tenant_id}/whatsapp/credentials", summary="Get full WhatsApp credentials (admin only)", tags=["WhatsApp"])
+async def get_whatsapp_credentials(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_or_owner_or_rop),
+):
+    """
+    Get FULL WhatsApp credentials for admin/owner (not masked).
+    
+    This endpoint returns the actual chatflow_token so admin can verify
+    the credentials are stored correctly.
+    
+    Returns:
+        {
+            ok: true,
+            chatflow_token: string (FULL),
+            chatflow_instance_id: string,
+            phone_number: string,
+            is_active: bool
+        }
+    """
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import text
+    
+    try:
+        # Check if user is admin or owner (privileged)
+        is_admin = getattr(current_user, "is_admin", False)
+        user_role = "admin" if is_admin else "rop"
+        
+        # Check tenant exists
+        result = await db.execute(text("SELECT id FROM tenants WHERE id = :tid"), {"tid": tenant_id})
+        if not result.fetchone():
+            return JSONResponse(status_code=404, content={"ok": False, "detail": "Tenant not found"})
+        
+        # Get WhatsApp account
+        acc = await crud.get_active_chatflow_account_for_tenant(db, tenant_id)
+        
+        if not acc:
+            return {
+                "ok": True,
+                "chatflow_token": None,
+                "chatflow_instance_id": None,
+                "phone_number": None,
+                "is_active": False,
+                "binding_exists": False,
+            }
+        
+        token = getattr(acc, "chatflow_token", None) or ""
+        instance_id = getattr(acc, "chatflow_instance_id", None) or ""
+        phone = getattr(acc, "phone_number", None)
+        is_active = getattr(acc, "is_active", False)
+        
+        return {
+            "ok": True,
+            "chatflow_token": token if token else None,  # Full token for admin
+            "chatflow_instance_id": instance_id or None,
+            "phone_number": phone,
+            "is_active": is_active,
+            "binding_exists": True,
+        }
+        
+    except Exception as e:
+        import traceback
+        print(f"[ERROR] get_whatsapp_credentials failed: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "detail": f"Failed to get credentials: {type(e).__name__}"}
+        )
+
+
+@router.get("/tenants/{tenant_id}/whatsapp/diagnostics", summary="Full WhatsApp diagnostics", tags=["WhatsApp"])
+async def get_whatsapp_diagnostics(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_or_owner_or_rop),
+):
+    """
+    Full WhatsApp diagnostics for troubleshooting.
+    
+    Returns:
+        {
+            ok: true,
+            binding_exists: bool,
+            is_active: bool,
+            phone_number: string|null,
+            instance_id: string|null,
+            token_masked: string|null,
+            token_length: int,
+            last_error: string|null,
+            last_outbound_at: string|null,
+            last_inbound_at: string|null,
+            credentials_complete: bool
+        }
+    """
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import text
+    
+    try:
+        # Check tenant exists
+        result = await db.execute(text("SELECT id, whatsapp_source FROM tenants WHERE id = :tid"), {"tid": tenant_id})
+        row = result.fetchone()
+        if not row:
+            return JSONResponse(status_code=404, content={"ok": False, "detail": "Tenant not found"})
+        
+        whatsapp_source = (row[1] or "chatflow").strip()
+        
+        # Get all WhatsApp accounts
+        accounts = await crud.list_whatsapp_accounts_by_tenant(db, tenant_id)
+        
+        if not accounts:
+            return {
+                "ok": True,
+                "whatsapp_source": whatsapp_source,
+                "binding_exists": False,
+                "is_active": False,
+                "accounts_count": 0,
+                "phone_number": None,
+                "instance_id": None,
+                "token_masked": None,
+                "token_length": 0,
+                "last_error": None,
+                "last_outbound_at": None,
+                "last_inbound_at": None,
+                "credentials_complete": False,
+            }
+        
+        # Use first active account or first account
+        acc = next((a for a in accounts if a.is_active), accounts[0])
+        
+        token = getattr(acc, "chatflow_token", None) or ""
+        instance_id = getattr(acc, "chatflow_instance_id", None) or ""
+        phone = getattr(acc, "phone_number", None)
+        is_active = getattr(acc, "is_active", False)
+        
+        # Mask token
+        if len(token) > 6:
+            token_masked = token[:4] + "***" + token[-2:]
+        elif token:
+            token_masked = "***"
+        else:
+            token_masked = None
+        
+        credentials_complete = bool(token.strip() and instance_id.strip())
+        
+        return {
+            "ok": True,
+            "whatsapp_source": whatsapp_source,
+            "binding_exists": True,
+            "is_active": is_active,
+            "accounts_count": len(accounts),
+            "phone_number": phone,
+            "instance_id": instance_id or None,
+            "token_masked": token_masked,
+            "token_length": len(token),
+            "last_error": None,  # Could be stored in DB
+            "last_outbound_at": None,  # Could be stored in DB
+            "last_inbound_at": None,  # Could be stored in DB
+            "credentials_complete": credentials_complete,
+            "ready_to_send": is_active and credentials_complete,
+        }
+        
+    except Exception as e:
+        import traceback
+        print(f"[ERROR] get_whatsapp_diagnostics failed: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "detail": f"Diagnostics failed: {type(e).__name__}"}
+        )

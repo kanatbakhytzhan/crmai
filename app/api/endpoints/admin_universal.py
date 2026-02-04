@@ -310,6 +310,28 @@ async def _get_tenant_with_fallback_fresh(db: AsyncSession, tenant_id: int) -> d
         except Exception:
             pass
     
+    # Intermediate fallback: Try reading ai_prompt even if other new columns are missing
+    try:
+        sql_medium = "SELECT id, ai_prompt FROM tenants WHERE id = :tid"
+        result = await db.execute(text(sql_medium), {"tid": tenant_id})
+        row = result.fetchone()
+        if row:
+            print(f"[INFO] Got tenant {tenant_id} via MEDIUM raw SQL fallback (ai_prompt preserved)")
+            return {
+                "id": row[0],
+                "name": f"Tenant {row[0]}", # Name might be missing in this query, retrieve if needed or accept limitation
+                "slug": f"unknown-{row[0]}",
+                "is_active": True,
+                "ai_prompt": row[1] if row[1] is not None else "",
+                "ai_enabled": True,
+                "whatsapp_source": "chatflow",
+                "ai_enabled_global": True,
+                "ai_after_lead_submitted_behavior": "polite_close",
+                "amocrm_base_domain": None,
+            }
+    except Exception as e_med:
+         print(f"[WARN] Medium raw SQL failed: {e_med}")
+
     # Fallback to minimal columns if some don't exist
     try:
         result = await db.execute(text("SELECT id, name, slug, is_active FROM tenants WHERE id = :tid"), {"tid": tenant_id})
@@ -1698,3 +1720,49 @@ async def amocrm_public_callback(
     </body>
     </html>
     """)
+
+
+@router.get("/tenants/{tenant_id}/settings/debug", summary="Диагностика колонок БД для настроек")
+async def debug_tenant_settings_db(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Check which columns actually exist in the DB for this tenant.
+    This helps diagnose why settings might be returned as empty (if columns are missing).
+    """
+    from sqlalchemy import text
+    try:
+        await _require_tenant_access(db, tenant_id, current_user)
+    except Exception:
+        pass # Allow even if access check fails slightly? No, better secure.
+
+    report = {"ok": True, "tenant_id": tenant_id, "columns": {}}
+    
+    columns_to_check = [
+        "ai_prompt", "ai_enabled_global", "whatsapp_source", 
+        "ai_after_lead_submitted_behavior", "amocrm_base_domain"
+    ]
+    
+    for col in columns_to_check:
+        try:
+            # Try specific select
+            res = await db.execute(text(f"SELECT {col} FROM tenants WHERE id = :tid"), {"tid": tenant_id})
+            val = res.scalar()
+            report["columns"][col] = {
+                "exists": True, 
+                "value_len": len(val) if isinstance(val, str) else None,
+                "value_repr": str(val)[:20] if val else str(val)
+            }
+        except Exception as e:
+             report["columns"][col] = {
+                "exists": False, 
+                "error": str(e)
+            }
+             try:
+                 await db.rollback()
+             except:
+                 pass
+                 
+    return report

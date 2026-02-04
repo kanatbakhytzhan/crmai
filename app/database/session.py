@@ -135,6 +135,19 @@ async def init_db():
                         print(f"[OK] SQLite: tenants.{col} uzhe est")
                     else:
                         print(f"[WARN] tenants.{col} SQLite: {type(e).__name__}: {e}")
+            # SQLite: CRM v2.5 columns for tenant_users
+            for col, typ in [
+                ("parent_user_id", "INTEGER"),
+                ("is_active", "INTEGER DEFAULT 1"),
+            ]:
+                try:
+                    await conn.execute(text(f"ALTER TABLE tenant_users ADD COLUMN {col} {typ}"))
+                    print(f"[OK] SQLite: tenant_users.{col} dobavlena")
+                except Exception as e:
+                    if "duplicate column" in str(e).lower():
+                        print(f"[OK] SQLite: tenant_users.{col} uzhe est")
+                    else:
+                        print(f"[WARN] tenant_users.{col} SQLite: {type(e).__name__}: {e}")
         if "postgresql" in db_url:
             # tenant_id в leads (nullable)
             try:

@@ -693,6 +693,42 @@ async def disconnect_amocrm(
         return JSONResponse(status_code=500, content={"ok": False, "detail": f"Disconnect failed: {type(e).__name__}"})
 
 
+# ========== Combined Mapping Endpoint ==========
+
+@router.get("/tenants/{tenant_id}/amocrm/mapping", summary="Все маппинги amoCRM (pipeline + field)")
+async def get_all_mappings(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Комбинированный endpoint: возвращает и pipeline-mapping, и field-mapping."""
+    try:
+        await _require_tenant_access(db, tenant_id, current_user)
+    except HTTPException as e:
+        return JSONResponse(status_code=e.status_code, content={"ok": False, "detail": e.detail})
+    except Exception:
+        return JSONResponse(status_code=403, content={"ok": False, "detail": "Access denied"})
+    
+    try:
+        pipeline_mappings = await crud.list_pipeline_mappings(db, tenant_id, "amocrm")
+        field_mappings = await crud.list_field_mappings(db, tenant_id, "amocrm")
+        
+        return {
+            "ok": True,
+            "pipeline_mappings": [
+                {"id": m.id, "stage_key": m.stage_key, "stage_id": m.stage_id, "pipeline_id": m.pipeline_id}
+                for m in pipeline_mappings
+            ],
+            "field_mappings": [
+                {"id": m.id, "field_key": m.field_key, "amo_field_id": m.amo_field_id, "entity_type": m.entity_type}
+                for m in field_mappings
+            ],
+        }
+    except Exception as e:
+        print(f"[ERROR] get_all_mappings failed: {type(e).__name__}: {e}")
+        return JSONResponse(status_code=500, content={"ok": False, "detail": f"Failed to get mappings: {type(e).__name__}"})
+
+
 # ========== Pipeline Mappings ==========
 
 @router.get("/tenants/{tenant_id}/amocrm/pipeline-mapping", response_model=list[PipelineMappingResponse], summary="Маппинг стадий amoCRM")
@@ -994,14 +1030,29 @@ async def tenant_self_check(
     Полная самопроверка tenant: таблицы, настройки, привязки, amoCRM.
     Возвращает массив checks с ok/error и причинами.
     """
-    await _require_tenant_access(db, tenant_id, current_user)
+    try:
+        await _require_tenant_access(db, tenant_id, current_user)
+    except HTTPException as e:
+        return JSONResponse(status_code=e.status_code, content={"ok": False, "detail": e.detail})
+    except Exception as e:
+        return JSONResponse(status_code=403, content={"ok": False, "detail": f"Access check failed: {type(e).__name__}"})
     
     checks = []
     overall_ok = True
     
-    # 1) Check tenant exists
-    tenant = await crud.get_tenant_by_id(db, tenant_id)
-    if not tenant:
+    # 1) Check tenant exists (use fallback to avoid ORM errors)
+    tenant_data = await _get_tenant_with_fallback(db, tenant_id)
+    if not tenant_data:
+        return {"ok": False, "checks": [{"check": "tenant_exists", "ok": False, "error": "Tenant not found"}]}
+    
+    # Create a wrapper for attribute access
+    class TenantWrapper:
+        def __init__(self, data):
+            for k, v in data.items():
+                setattr(self, k, v)
+    tenant = TenantWrapper(tenant_data)
+    
+    if not tenant_data:
         return {"ok": False, "checks": [{"check": "tenant_exists", "ok": False, "error": "Tenant not found"}]}
     checks.append({"check": "tenant_exists", "ok": True, "detail": f"Tenant '{tenant.name}' exists"})
     

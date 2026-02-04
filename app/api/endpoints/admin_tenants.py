@@ -235,26 +235,38 @@ async def list_tenant_users(
     Список пользователей tenant (tenant_users + User). CRM v2.5: parent_user_id, is_active.
     Доступ: admin или owner/rop в этом tenant.
     """
-    if not await _require_tenant_admin_or_owner_rop(db, tenant_id, current_user):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin or tenant owner/rop required")
-    tenant = await crud.get_tenant_by_id(db, tenant_id)
-    if not tenant:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
-    rows = await crud.list_tenant_users_with_user(db, tenant_id)
-    items = [
-        TenantUserResponse(
-            id=tu.id,
-            user_id=user.id,
-            email=user.email,
-            company_name=user.company_name,
-            role=tu.role or "member",
-            parent_user_id=getattr(tu, "parent_user_id", None),
-            is_active=getattr(tu, "is_active", True),
-            created_at=tu.created_at,
-        )
-        for tu, user in rows
-    ]
-    return {"users": items, "total": len(items)}
+    import traceback
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import text
+    
+    try:
+        if not await _require_tenant_admin_or_owner_rop(db, tenant_id, current_user):
+            return JSONResponse(status_code=403, content={"ok": False, "detail": "Admin or tenant owner/rop required"})
+        
+        # Check tenant exists with raw SQL
+        result = await db.execute(text("SELECT id FROM tenants WHERE id = :tid"), {"tid": tenant_id})
+        if not result.fetchone():
+            return JSONResponse(status_code=404, content={"ok": False, "detail": "Tenant not found"})
+        
+        rows = await crud.list_tenant_users_with_user(db, tenant_id)
+        items = [
+            TenantUserResponse(
+                id=tu.id,
+                user_id=user.id,
+                email=user.email,
+                company_name=user.company_name,
+                role=tu.role or "member",
+                parent_user_id=getattr(tu, "parent_user_id", None),
+                is_active=getattr(tu, "is_active", True),
+                created_at=tu.created_at,
+            )
+            for tu, user in rows
+        ]
+        return {"ok": True, "users": items, "total": len(items)}
+    except Exception as e:
+        print(f"[ERROR] list_tenant_users failed: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"ok": False, "detail": f"Failed to list users: {type(e).__name__}"})
 
 
 @router.post("/tenants/{tenant_id}/users", status_code=status.HTTP_201_CREATED)

@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -143,6 +144,34 @@ class _LogOriginMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(_LogOriginMiddleware)
+
+
+# Global exception handler to ensure CORS headers are always present
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch all unhandled exceptions and return JSON with CORS headers."""
+    import traceback
+    origin = request.headers.get("origin", "")
+    
+    # Log the error
+    print(f"[ERROR] Unhandled exception: {type(exc).__name__}: {exc}")
+    traceback.print_exc()
+    
+    # Build response
+    response = JSONResponse(
+        status_code=500,
+        content={"ok": False, "detail": f"Internal server error: {type(exc).__name__}"}
+    )
+    
+    # Add CORS headers manually if origin is allowed
+    allowed_origins = _origins_list + ["https://buildcrm-pwa.vercel.app"]
+    if origin in allowed_origins or (origin and ".vercel.app" in origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Methods"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+    
+    return response
 
 
 # Explicit alias for frontend: POST /api/auth/login (form-urlencoded username, password) -> { access_token, token_type }

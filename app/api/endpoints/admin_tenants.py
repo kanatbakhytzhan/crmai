@@ -5,7 +5,7 @@ API эндпоинты админки: tenants и whatsapp_accounts (multi-tenan
 from fastapi import APIRouter, Depends, HTTPException, Request, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db, get_current_admin, get_current_user
+from app.api.deps import get_db, get_current_admin, get_current_user, get_current_admin_or_owner_or_rop
 from app.database import crud
 from app.database.models import User
 from app.schemas.tenant import (
@@ -440,38 +440,49 @@ async def upsert_whatsapp(
     tenant_id: int,
     body: WhatsAppAccountUpsert,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(get_current_admin_or_owner_or_rop),
 ):
     """
     Сохранить/обновить привязку WhatsApp/ChatFlow для tenant (одна запись на tenant).
     Если запись уже есть — обновить; если нет — создать.
     При active=true обязательны chatflow_token и chatflow_instance_id (иначе бот не отвечает).
     """
-    tenant = await crud.get_tenant_by_id(db, tenant_id)
-    if not tenant:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
-    if body.is_active:
-        token_ok = (body.chatflow_token or "").strip()
-        instance_ok = (body.chatflow_instance_id or "").strip()
-        if not token_ok or not instance_ok:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="When active=true, chatflow_token and chatflow_instance_id are required",
-            )
-    phone_number = (body.phone_number or "").strip() or "—"
-    instance_id = (body.chatflow_instance_id or "").strip() or None
-    token = (body.chatflow_token or "").strip() or None
-    print("[ADMIN] whatsapp upsert tenant_id=%s active=%s phone_number=%s token_len=%s instance_len=%s", tenant_id, body.is_active, phone_number, len(body.chatflow_token or ""), len(body.chatflow_instance_id or ""))
-    acc = await crud.upsert_whatsapp_for_tenant(
-        db,
-        tenant_id=tenant_id,
-        phone_number=phone_number,
-        chatflow_token=token,
-        chatflow_instance_id=instance_id,
-        is_active=body.is_active,
-    )
-    print("[ADMIN] whatsapp upsert saved id=%s", acc.id)
-    return WhatsAppAccountResponse.model_validate(acc)
+    import traceback
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import text
+    
+    try:
+        # Check tenant exists using raw SQL to avoid column errors
+        result = await db.execute(text("SELECT id FROM tenants WHERE id = :tid"), {"tid": tenant_id})
+        if not result.fetchone():
+            return JSONResponse(status_code=404, content={"ok": False, "detail": "Tenant not found"})
+        
+        if body.is_active:
+            token_ok = (body.chatflow_token or "").strip()
+            instance_ok = (body.chatflow_instance_id or "").strip()
+            if not token_ok or not instance_ok:
+                return JSONResponse(
+                    status_code=400,
+                    content={"ok": False, "detail": "When active=true, chatflow_token and chatflow_instance_id are required"},
+                )
+        phone_number = (body.phone_number or "").strip() or "—"
+        instance_id = (body.chatflow_instance_id or "").strip() or None
+        token = (body.chatflow_token or "").strip() or None
+        print(f"[ADMIN] whatsapp upsert tenant_id={tenant_id} active={body.is_active} phone_number={phone_number} token_len={len(body.chatflow_token or '')} instance_len={len(body.chatflow_instance_id or '')}")
+        acc = await crud.upsert_whatsapp_for_tenant(
+            db,
+            tenant_id=tenant_id,
+            phone_number=phone_number,
+            chatflow_token=token,
+            chatflow_instance_id=instance_id,
+            is_active=body.is_active,
+        )
+        print(f"[ADMIN] whatsapp upsert saved id={acc.id}")
+        return WhatsAppAccountResponse.model_validate(acc)
+    except Exception as e:
+        print(f"[ERROR] upsert_whatsapp failed: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"ok": False, "detail": f"Failed to save WhatsApp: {type(e).__name__}"})
 
 
 def _whatsapp_to_saved(acc) -> WhatsAppSaved:
@@ -491,7 +502,7 @@ async def attach_whatsapp(
     tenant_id: int,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(get_current_admin_or_owner_or_rop),
 ):
     """
     Привязать/обновить WhatsApp (UPSERT): одна запись на tenant.
@@ -500,62 +511,83 @@ async def attach_whatsapp(
     При active=false можно без token/instance_id (существующие не затираются).
     Ответ: { ok: true, whatsapp: { id, tenant_id, phone_number, active, chatflow_instance_id, chatflow_token } }.
     """
+    import traceback
+    from fastapi.responses import JSONResponse
+    
     try:
-        body_raw = await request.json()
-    except Exception:
-        body_raw = {}
-    body_raw_keys = list(body_raw.keys()) if isinstance(body_raw, dict) else []
-    try:
-        body = WhatsAppAccountCreate.model_validate(body_raw)
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+        try:
+            body_raw = await request.json()
+        except Exception:
+            body_raw = {}
+        body_raw_keys = list(body_raw.keys()) if isinstance(body_raw, dict) else []
+        try:
+            body = WhatsAppAccountCreate.model_validate(body_raw)
+        except Exception as e:
+            return JSONResponse(status_code=422, content={"ok": False, "detail": str(e)})
 
-    tenant = await crud.get_tenant_by_id(db, tenant_id)
-    if not tenant:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
-    if body.is_active:
-        token_ok = (body.chatflow_token or "").strip()
-        instance_ok = (body.chatflow_instance_id or "").strip()
-        if not token_ok or not instance_ok:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="When active=true, chatflow_token and chatflow_instance_id are required (non-empty)",
-            )
-    token = (body.chatflow_token or "").strip() or None
-    instance_id = (body.chatflow_instance_id or "").strip() or None
-    phone_number = (body.phone_number or "").strip() or "—"
-    token_len = len(body.chatflow_token or "")
-    instance_len = len(body.chatflow_instance_id or "")
-    print(
-        "[ADMIN] whatsapp attach tenant_id=%s active=%s phone_number=%s token_len=%s instance_len=%s json_keys=%s",
-        tenant_id, body.is_active, phone_number, token_len, instance_len, body_raw_keys,
-    )
-    acc = await crud.upsert_whatsapp_for_tenant(
-        db,
-        tenant_id=tenant_id,
-        phone_number=phone_number,
-        phone_number_id=body.phone_number_id,
-        chatflow_token=token,
-        chatflow_instance_id=instance_id,
-        is_active=body.is_active,
-    )
-    print("[ADMIN] whatsapp attach saved id=%s", acc.id)
-    return {"ok": True, "whatsapp": _whatsapp_to_saved(acc)}
+        # Check tenant exists using raw SQL to avoid column errors
+        from sqlalchemy import text
+        result = await db.execute(text("SELECT id FROM tenants WHERE id = :tid"), {"tid": tenant_id})
+        if not result.fetchone():
+            return JSONResponse(status_code=404, content={"ok": False, "detail": "Tenant not found"})
+        
+        if body.is_active:
+            token_ok = (body.chatflow_token or "").strip()
+            instance_ok = (body.chatflow_instance_id or "").strip()
+            if not token_ok or not instance_ok:
+                return JSONResponse(
+                    status_code=422,
+                    content={"ok": False, "detail": "When active=true, chatflow_token and chatflow_instance_id are required"}
+                )
+        token = (body.chatflow_token or "").strip() or None
+        instance_id = (body.chatflow_instance_id or "").strip() or None
+        phone_number = (body.phone_number or "").strip() or "—"
+        token_len = len(body.chatflow_token or "")
+        instance_len = len(body.chatflow_instance_id or "")
+        print(
+            f"[ADMIN] whatsapp attach tenant_id={tenant_id} active={body.is_active} phone_number={phone_number} token_len={token_len} instance_len={instance_len} json_keys={body_raw_keys}",
+        )
+        acc = await crud.upsert_whatsapp_for_tenant(
+            db,
+            tenant_id=tenant_id,
+            phone_number=phone_number,
+            phone_number_id=body.phone_number_id,
+            chatflow_token=token,
+            chatflow_instance_id=instance_id,
+            is_active=body.is_active,
+        )
+        print(f"[ADMIN] whatsapp attach saved id={acc.id}")
+        return {"ok": True, "whatsapp": _whatsapp_to_saved(acc)}
+    except Exception as e:
+        print(f"[ERROR] attach_whatsapp failed: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"ok": False, "detail": f"Failed to save WhatsApp: {type(e).__name__}"})
 
 
 @router.get("/tenants/{tenant_id}/whatsapp", response_model=dict)
 async def list_whatsapp(
     tenant_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(get_current_admin_or_owner_or_rop),
 ):
     """Список привязок WhatsApp tenant с полями: id, tenant_id, phone_number, active, chatflow_instance_id, chatflow_token."""
-    tenant = await crud.get_tenant_by_id(db, tenant_id)
-    if not tenant:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
-    accounts = await crud.list_whatsapp_accounts_by_tenant(db, tenant_id)
-    items = [_whatsapp_to_saved(a) for a in accounts]
-    return {"ok": True, "whatsapp": items, "total": len(items)}
+    import traceback
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import text
+    
+    try:
+        # Check tenant exists using raw SQL to avoid column errors
+        result = await db.execute(text("SELECT id FROM tenants WHERE id = :tid"), {"tid": tenant_id})
+        if not result.fetchone():
+            return JSONResponse(status_code=404, content={"ok": False, "detail": "Tenant not found"})
+        
+        accounts = await crud.list_whatsapp_accounts_by_tenant(db, tenant_id)
+        items = [_whatsapp_to_saved(a) for a in accounts]
+        return {"ok": True, "whatsapp": items, "total": len(items)}
+    except Exception as e:
+        print(f"[ERROR] list_whatsapp failed: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"ok": False, "detail": f"Failed to list WhatsApp: {type(e).__name__}"})
 
 
 @router.delete("/tenants/{tenant_id}/whatsapps/{whatsapp_id}")

@@ -715,11 +715,11 @@ async def delete_tenant_whatsapp(
 
 # ========== WhatsApp Test Endpoint ==========
 
-from pydantic import BaseModel as PydanticBaseModel
+from pydantic import BaseModel as PydanticBaseModel, Field, AliasChoices
 
 class WhatsAppTestBody(PydanticBaseModel):
     """Body for POST /api/admin/tenants/{id}/whatsapp/test"""
-    to_phone: str
+    to_phone: str = Field(..., validation_alias=AliasChoices("to_phone", "phone"))
     message: str = "Test message from BuildCRM"
 
 

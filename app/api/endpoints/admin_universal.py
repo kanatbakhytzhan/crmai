@@ -69,10 +69,13 @@ async def _require_tenant_access(db: AsyncSession, tenant_id: int, current_user:
         role = await crud.get_tenant_user_role(db, tenant_id, user_id)
     except Exception as e:
         error_str = str(e)
-        print(f"[WARN] get_tenant_user_role failed for tenant {tenant_id}, user {user_id}: {type(e).__name__}: {e}")
+        error_name = type(e).__name__
+        print(f"[WARN] get_tenant_user_role failed for tenant {tenant_id}, user {user_id}: {error_name}: {e}")
         
         # Fallback: check tenant_users table directly with raw SQL
-        if "OperationalError" in type(e).__name__ or "no such column" in error_str:
+        # Handle both SQLite (OperationalError) and PostgreSQL (ProgrammingError)
+        if any(x in error_name for x in ["OperationalError", "ProgrammingError"]) or \
+           any(x in error_str for x in ["no such column", "column", "does not exist", "UndefinedColumn"]):
             try:
                 await db.rollback()
             except Exception:
@@ -217,9 +220,12 @@ async def _get_tenant_with_fallback(db: AsyncSession, tenant_id: int) -> dict | 
             }
         return None
     except Exception as e:
+        error_name = type(e).__name__
         error_str = str(e)
-        if "OperationalError" in type(e).__name__ or "no such column" in error_str:
-            print(f"[WARN] ORM failed for tenant {tenant_id}, falling back to raw SQL: {e}")
+        # Handle both SQLite (OperationalError) and PostgreSQL (ProgrammingError) column errors
+        if any(x in error_name for x in ["OperationalError", "ProgrammingError"]) or \
+           any(x in error_str for x in ["no such column", "column", "does not exist", "UndefinedColumn"]):
+            print(f"[WARN] ORM failed for tenant {tenant_id} ({error_name}), falling back to raw SQL")
             try:
                 await db.rollback()
             except Exception:
@@ -232,6 +238,7 @@ async def _get_tenant_with_fallback(db: AsyncSession, tenant_id: int) -> dict | 
         result = await db.execute(text("SELECT id, name, slug, is_active, created_at FROM tenants WHERE id = :tid"), {"tid": tenant_id})
         row = result.fetchone()
         if row:
+            print(f"[INFO] Got tenant {tenant_id} via raw SQL fallback")
             return {
                 "id": row[0],
                 "name": row[1],

@@ -446,9 +446,13 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
     log.info("[CHATFLOW] messages loaded count=%s", len(messages_for_gpt))
 
     # D) tenant.ai_prompt из БД (не из старого объекта)
+    # ВАЖНО: если tenant.ai_prompt задан — используем его как system_override
+    # Если пуст — используем дефолтный prompt (system_override=None)
     tenant = await crud.get_tenant_by_id(db, tenant_id)
-    system_override = (getattr(tenant, "ai_prompt", None) or "").strip() or None
-    log.info("[GPT] tenant_id=%s use_tenant_prompt=%s prompt_len=%s", tenant_id, bool(system_override), len(system_override or ""))
+    tenant_prompt = (getattr(tenant, "ai_prompt", None) or "").strip()
+    system_override = tenant_prompt if tenant_prompt else None
+    prompt_source = "tenant" if tenant_prompt else "default"
+    log.info("[GPT] tenant_id=%s prompt_source=%s prompt_len=%s", tenant_id, prompt_source, len(tenant_prompt))
 
     # System: номер из jid (не проси номер) + при наличии истории не повторять приветствие
     extra_system = CHATFLOW_PHONE_CONTEXT.format(phone=phone_from_jid)

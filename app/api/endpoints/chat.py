@@ -603,16 +603,21 @@ async def post_lead_ai_mute(
 ):
     """
     Включить/выключить AI в чате лида (per-chat mute). Запись в ai_chat_mutes по chat_key (remote_jid).
-    CRM v2.5: если lead.tenant_id null — определяем по me.tenant_id или owner→tenant_users; иначе 409.
+    CRM v2.5: если lead.tenant_id null — определяем по me.tenant_id или owner→tenant_users.
+    Исправлено: возвращаем JSON ошибку вместо traceback.
     """
     multitenant = (getattr(get_settings(), "multitenant_enabled", "false") or "false").upper() == "TRUE"
     lead = await crud.get_lead_by_id(db, lead_id, current_user.id, multitenant_include_tenant_leads=multitenant)
     if not lead:
-        raise HTTPException(status_code=404, detail="Lead not found")
+        return {"ok": False, "error": "lead_not_found", "detail": f"Lead {lead_id} not found"}
+    
     tenant_id = getattr(lead, "tenant_id", None)
     bot_user = await crud.get_bot_user_by_id(db, lead.bot_user_id)
     remote_jid = (bot_user.user_id if bot_user else "") or ""
+    
+    # Попытка разрешить tenant_id если отсутствует
     if tenant_id is None:
+        # 1) Попробовать по conversation
         resolved = await crud.resolve_lead_tenant_id(db, lead)
         if resolved is not None:
             lead.tenant_id = resolved
@@ -620,7 +625,7 @@ async def post_lead_ai_mute(
             await db.refresh(lead)
             tenant_id = resolved
         else:
-            # CRM v2.5: попытка по текущему пользователю (me.tenant_id)
+            # 2) Попробовать по текущему пользователю
             me_tenant = await crud.get_tenant_for_me(db, current_user.id)
             if me_tenant:
                 tenant_id = me_tenant.id
@@ -628,21 +633,34 @@ async def post_lead_ai_mute(
                 await db.commit()
                 await db.refresh(lead)
             else:
-                raise HTTPException(
-                    status_code=409,
-                    detail={
-                        "detail": "cannot_resolve_tenant",
-                        "reason": "Lead has no tenant_id and current user has no tenant. Run admin fix-leads-tenant or re-create lead through tenant-bound webhook.",
-                        "lead_id": lead_id,
-                        "remoteJid": remote_jid or None,
-                    },
+                # 3) Попробовать найти любой tenant где owner_id совпадает
+                from sqlalchemy import select
+                from app.database.models import Tenant
+                result = await db.execute(
+                    select(Tenant).where(Tenant.default_owner_user_id == lead.owner_id).limit(1)
                 )
+                fallback_tenant = result.scalar_one_or_none()
+                if fallback_tenant:
+                    tenant_id = fallback_tenant.id
+                    lead.tenant_id = tenant_id
+                    await db.commit()
+                    await db.refresh(lead)
+                else:
+                    return {
+                        "ok": False, 
+                        "error": "cannot_resolve_tenant",
+                        "detail": "Lead has no tenant_id and could not resolve. Assign lead to tenant first.",
+                        "lead_id": lead_id,
+                        "remote_jid": remote_jid or None,
+                    }
+    
     if not remote_jid:
-        raise HTTPException(status_code=400, detail="Lead has no remote_jid (bot_user.user_id)")
+        return {"ok": False, "error": "no_remote_jid", "detail": "Lead has no remote_jid (bot_user.user_id). Cannot mute."}
+    
     chat_key = remote_jid
     await crud.set_ai_chat_mute(db, tenant_id=tenant_id, chat_key=chat_key, is_muted=body.muted, lead_id=lead_id, muted_by_user_id=current_user.id)
     await crud.set_chat_ai_state(db, tenant_id, remote_jid, enabled=not body.muted)
-    return {"ok": True, "muted": body.muted}
+    return {"ok": True, "muted": body.muted, "tenant_id": tenant_id, "remote_jid": remote_jid}
 
 
 @router.post("/ai/mute", response_model=dict)

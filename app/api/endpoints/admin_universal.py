@@ -322,6 +322,163 @@ async def tenant_snapshot(
     }
 
 
+# ========== Self-Check Endpoint ==========
+
+@router.post("/tenants/{tenant_id}/self-check", summary="Полная проверка конфигурации tenant")
+async def tenant_self_check(
+    tenant_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Полная самопроверка tenant: таблицы, настройки, привязки, amoCRM.
+    Возвращает массив checks с ok/error и причинами.
+    """
+    await _require_tenant_access(db, tenant_id, current_user)
+    
+    checks = []
+    overall_ok = True
+    
+    # 1) Check tenant exists
+    tenant = await crud.get_tenant_by_id(db, tenant_id)
+    if not tenant:
+        return {"ok": False, "checks": [{"check": "tenant_exists", "ok": False, "error": "Tenant not found"}]}
+    checks.append({"check": "tenant_exists", "ok": True, "detail": f"Tenant '{tenant.name}' exists"})
+    
+    # 2) Check tenant settings
+    whatsapp_source = getattr(tenant, "whatsapp_source", "chatflow") or "chatflow"
+    ai_enabled_global = getattr(tenant, "ai_enabled_global", True)
+    ai_prompt_len = len(getattr(tenant, "ai_prompt", "") or "")
+    checks.append({
+        "check": "tenant_settings", 
+        "ok": True, 
+        "detail": f"whatsapp_source={whatsapp_source}, ai_enabled_global={ai_enabled_global}, ai_prompt_len={ai_prompt_len}"
+    })
+    
+    # 3) Check WhatsApp binding (for chatflow mode)
+    if whatsapp_source == "chatflow":
+        wa_accounts = await crud.list_whatsapp_accounts_by_tenant(db, tenant_id)
+        active_wa = [a for a in wa_accounts if a.is_active]
+        if not active_wa:
+            checks.append({
+                "check": "whatsapp_binding", 
+                "ok": False, 
+                "error": "No active WhatsApp account. Go to Admin > Tenants > WhatsApp to bind."
+            })
+            overall_ok = False
+        else:
+            acc = active_wa[0]
+            has_token = bool(getattr(acc, "chatflow_token", None))
+            has_instance = bool(getattr(acc, "chatflow_instance_id", None))
+            if not has_token or not has_instance:
+                checks.append({
+                    "check": "whatsapp_binding", 
+                    "ok": False, 
+                    "error": f"WhatsApp account missing chatflow_token or chatflow_instance_id"
+                })
+                overall_ok = False
+            else:
+                checks.append({
+                    "check": "whatsapp_binding", 
+                    "ok": True, 
+                    "detail": f"WhatsApp bound: phone={acc.phone_number}, instance_id={acc.chatflow_instance_id[:8]}..."
+                })
+    
+    # 4) Check AmoCRM integration (for amomarket mode)
+    if whatsapp_source == "amomarket":
+        integration = await crud.get_tenant_integration(db, tenant_id, "amocrm")
+        if not integration or not integration.is_active:
+            checks.append({
+                "check": "amocrm_integration", 
+                "ok": False, 
+                "error": "AmoCRM not connected. Go to Admin > Tenants > amoCRM to connect."
+            })
+            overall_ok = False
+        elif not integration.access_token:
+            checks.append({
+                "check": "amocrm_integration", 
+                "ok": False, 
+                "error": "AmoCRM has no access_token. Re-authorize via OAuth."
+            })
+            overall_ok = False
+        else:
+            from datetime import datetime
+            expired = integration.token_expires_at and integration.token_expires_at < datetime.utcnow()
+            if expired:
+                checks.append({
+                    "check": "amocrm_integration", 
+                    "ok": False, 
+                    "error": f"AmoCRM token expired at {integration.token_expires_at}. Trigger refresh."
+                })
+                overall_ok = False
+            else:
+                checks.append({
+                    "check": "amocrm_integration", 
+                    "ok": True, 
+                    "detail": f"AmoCRM connected: domain={integration.base_domain}, expires={integration.token_expires_at}"
+                })
+        
+        # 4b) Check pipeline mappings for amomarket
+        mappings = await crud.list_pipeline_mappings(db, tenant_id, "amocrm")
+        unsorted_mapped = any(m.stage_key == "unprocessed" and m.stage_id for m in mappings)
+        if not unsorted_mapped:
+            checks.append({
+                "check": "pipeline_mapping", 
+                "ok": False, 
+                "error": "No 'unprocessed' stage mapped. New leads cannot be created in amoCRM."
+            })
+            overall_ok = False
+        else:
+            checks.append({
+                "check": "pipeline_mapping", 
+                "ok": True, 
+                "detail": f"{len(mappings)} stage mappings configured"
+            })
+    
+    # 5) Check webhook_key
+    webhook_key = getattr(tenant, "webhook_key", None)
+    if not webhook_key:
+        checks.append({
+            "check": "webhook_key", 
+            "ok": False, 
+            "error": "Tenant has no webhook_key. Webhooks cannot be received."
+        })
+        overall_ok = False
+    else:
+        checks.append({
+            "check": "webhook_key", 
+            "ok": True, 
+            "detail": f"webhook_key={webhook_key[:8]}..."
+        })
+    
+    # 6) Dry-run: check AI can work
+    if ai_enabled_global:
+        from app.core.config import get_settings
+        settings = get_settings()
+        has_openai_key = bool(getattr(settings, "openai_api_key", None))
+        if not has_openai_key:
+            checks.append({
+                "check": "ai_config", 
+                "ok": False, 
+                "error": "OPENAI_API_KEY not configured. AI replies will fail."
+            })
+            overall_ok = False
+        else:
+            checks.append({
+                "check": "ai_config", 
+                "ok": True, 
+                "detail": "OpenAI API key configured"
+            })
+    
+    return {
+        "ok": overall_ok,
+        "tenant_id": tenant_id,
+        "tenant_name": tenant.name,
+        "whatsapp_source": whatsapp_source,
+        "checks": checks,
+    }
+
+
 # ========== Public AmoCRM OAuth Callback ==========
 
 @integrations_router.get("/amocrm/callback", include_in_schema=False, summary="OAuth callback от amoCRM")

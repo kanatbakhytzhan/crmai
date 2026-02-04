@@ -1223,9 +1223,25 @@ async def amocrm_public_callback(
         </html>
         """, status_code=400)
     
-    # Извлекаем tenant_id из state
-    match = re.match(r"tenant_(\d+)", state or "")
-    if not match:
+    # Извлекаем tenant_id и base_domain из state
+    # Формат state: "tenant_{id}_{base_domain}" или старый "tenant_{id}"
+    base_domain = None
+    tenant_id = None
+    
+    # Новый формат: tenant_2_kanabahytzhan.amocrm.ru
+    match_new = re.match(r"tenant_(\d+)_(.+)", state or "")
+    if match_new:
+        tenant_id = int(match_new.group(1))
+        base_domain = match_new.group(2)
+        print(f"[INFO] AmoCRM callback: state format=new, tenant_id={tenant_id}, base_domain={base_domain}")
+    else:
+        # Старый формат: tenant_2
+        match_old = re.match(r"tenant_(\d+)", state or "")
+        if match_old:
+            tenant_id = int(match_old.group(1))
+            print(f"[INFO] AmoCRM callback: state format=old, tenant_id={tenant_id}")
+    
+    if not tenant_id:
         return HTMLResponse(f"""
         <html>
         <head><title>Error</title></head>
@@ -1236,23 +1252,21 @@ async def amocrm_public_callback(
         </body>
         </html>
         """, status_code=400)
-    tenant_id = int(match.group(1))
     
     print(f"[INFO] AmoCRM callback: tenant_id={tenant_id}, code={code[:10]}...")
     
-    # Определяем base_domain: СНАЧАЛА из tenant settings, потом из integration, потом из referer
-    base_domain = None
-    
-    # 1. Попробовать из tenant.amocrm_base_domain
-    try:
-        tenant_data = await _get_tenant_with_fallback(db, tenant_id)
-        if tenant_data:
-            base_domain = (tenant_data.get("amocrm_base_domain") or "").strip()
-    except Exception as e:
-        print(f"[WARN] Failed to get tenant for callback: {e}")
-    
-    # 2. Fallback: из существующей интеграции
+    # Если base_domain не из state, пробуем другие источники
     if not base_domain:
+        # 1. Попробовать из tenant.amocrm_base_domain
+        try:
+            tenant_data = await _get_tenant_with_fallback(db, tenant_id)
+            if tenant_data:
+                base_domain = (tenant_data.get("amocrm_base_domain") or "").strip()
+        except Exception as e:
+            print(f"[WARN] Failed to get tenant for callback: {e}")
+    
+    if not base_domain:
+        # 2. Fallback: из существующей интеграции
         try:
             integration = await crud.get_tenant_integration(db, tenant_id, "amocrm")
             if integration and integration.base_domain:
@@ -1260,8 +1274,8 @@ async def amocrm_public_callback(
         except Exception as e:
             print(f"[WARN] Failed to get integration: {e}")
     
-    # 3. Fallback: из referer (менее надежно)
     if not base_domain and referer:
+        # 3. Fallback: из referer (менее надежно)
         domain_match = re.search(r"https?://([^/]+\.(amocrm\.ru|kommo\.com))", referer)
         if domain_match:
             base_domain = domain_match.group(1)

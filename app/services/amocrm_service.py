@@ -205,12 +205,14 @@ async def get_amocrm_client(db: AsyncSession, tenant_id: int) -> AmoCRMClient | 
 
 def build_auth_url(tenant_id: int, base_domain: str) -> str | None:
     """
-    Сформировать URL для OAuth2 авторизации в amoCRM.
+    Сформировать URL для OAuth авторизации в amoCRM.
     
-    Правильный формат AmoCRM OAuth2:
-    https://{base_domain}/oauth2/authorize?client_id=...&redirect_uri=...&response_type=code&state=...
+    ВАЖНО: AmoCRM OAuth работает так:
+    1. Авторизация: https://www.amocrm.ru/oauth?client_id=...&state=...&mode=post_message
+       (всегда на www.amocrm.ru, НЕ на поддомене!)
+    2. Обмен кода: POST https://{subdomain}.amocrm.ru/oauth2/access_token
     
-    НЕ ИСПОЛЬЗОВАТЬ /oauth или mode=post_message (устаревшие).
+    base_domain используется только для обмена токенов, не для authorize.
     """
     settings = get_settings()
     if not settings.amo_client_id or not settings.amo_redirect_url:
@@ -220,13 +222,22 @@ def build_auth_url(tenant_id: int, base_domain: str) -> str | None:
     from urllib.parse import quote
     redirect_uri_encoded = quote(settings.amo_redirect_url, safe='')
     
-    state = f"tenant_{tenant_id}"
+    # State содержит tenant_id и base_domain для callback
+    # Формат: tenant_{id}_{base_domain}
+    state = f"tenant_{tenant_id}_{base_domain}"
+    
+    # AmoCRM authorize URL всегда на www.amocrm.ru (или www.kommo.com для kommo)
+    # mode=post_message нужен для popup окна
+    if ".kommo.com" in base_domain:
+        auth_host = "www.kommo.com"
+    else:
+        auth_host = "www.amocrm.ru"
+    
     return (
-        f"https://{base_domain}/oauth2/authorize"
+        f"https://{auth_host}/oauth"
         f"?client_id={settings.amo_client_id}"
-        f"&redirect_uri={redirect_uri_encoded}"
-        f"&response_type=code"
         f"&state={state}"
+        f"&mode=post_message"
     )
 
 

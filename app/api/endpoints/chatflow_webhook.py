@@ -345,7 +345,17 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
             return {"ok": True, "dedup": True}
 
     # Resolve tenant early for credentials (needed for all send operations)
-    tenant = await _resolve_tenant(db, data, resolved_tenant)
+    try:
+        tenant = await _resolve_tenant(db, data, resolved_tenant)
+    except Exception as e:
+        # Safeguard against DB schema mismatch (UndefinedColumnError)
+        error_str = str(e)
+        if "UndefinedColumnError" in error_str or "ProgrammingError" in type(e).__name__:
+            log.critical("[CHATFLOW] DB SCHEMA MISMATCH! Missing columns in tenants table. Migration required. Error: %s", error_str)
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=500, content={"ok": False, "error": "DB_SCHEMA_MISMATCH", "detail": "Critical: Database missing required columns"})
+        raise e
+
     tenant_id = tenant.id if tenant else None
     
     # Get WhatsApp account with credentials for sending

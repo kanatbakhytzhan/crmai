@@ -576,21 +576,6 @@ async def init_db():
                 print("[OK] Tablica auto_assign_rules proverena/sozdana")
             except Exception as e:
                 print(f"[WARN] auto_assign_rules create: {type(e).__name__}: {e}")
-            # Universal Admin Console: tenants new columns (PostgreSQL)
-            # Note: Cannot use NOT NULL with ADD COLUMN on existing tables with data
-            # So we add columns as nullable, then update defaults, then could alter to NOT NULL separately
-            try:
-                for col, defn in [
-                    ("whatsapp_source", "VARCHAR(32) DEFAULT 'chatflow'"),
-                    ("ai_enabled_global", "BOOLEAN DEFAULT TRUE"),
-                    ("ai_after_lead_submitted_behavior", "VARCHAR(64) DEFAULT 'polite_close'"),
-                    ("amocrm_base_domain", "VARCHAR(255)"),
-                ]:
-                    try:
-                        await conn.execute(text(f"ALTER TABLE tenants ADD COLUMN IF NOT EXISTS {col} {defn}"))
-                    except Exception as col_err:
-                        # Column might already exist, that's OK
-                        print(f"[INFO] tenants.{col}: {type(col_err).__name__}")
                 # Set defaults for any NULL values
                 await conn.execute(text("UPDATE tenants SET whatsapp_source = 'chatflow' WHERE whatsapp_source IS NULL"))
                 await conn.execute(text("UPDATE tenants SET ai_enabled_global = TRUE WHERE ai_enabled_global IS NULL"))
@@ -598,6 +583,25 @@ async def init_db():
                 print("[OK] Universal Admin: kolonki tenants provereny")
             except Exception as e:
                 print(f"[WARN] tenants Universal Admin columns: {type(e).__name__}: {e}")
+            # Universal Admin Console: tenants new columns (PostgreSQL) - Explicitly add amocrm_base_domain
+            try:
+                for col, defn in [
+                    ("whatsapp_source", "VARCHAR(32) DEFAULT 'chatflow'"),
+                    ("ai_enabled_global", "BOOLEAN DEFAULT TRUE"),
+                    ("ai_after_lead_submitted_behavior", "VARCHAR(64) DEFAULT 'polite_close'"),
+                    ("amocrm_base_domain", "VARCHAR(255)"),
+                    ("ai_prompt", "TEXT"), # Ensure this is also covered here just in case
+                ]:
+                    try:
+                        await conn.execute(text(f"ALTER TABLE tenants ADD COLUMN IF NOT EXISTS {col} {defn}"))
+                    except Exception as col_err:
+                        # Column might already exist, that's OK (IF NOT EXISTS usually handles it, but sometimes racing)
+                        pass
+                print("[OK] Tenants extra columns (amocrm_base_domain etc) checked/added")
+            except Exception as e:
+                print(f"[WARN] tenants extra columns: {type(e).__name__}: {e}")
+
+            # Universal Admin Console: tenant_integrations
             # Universal Admin Console: tenant_integrations
             try:
                 await conn.execute(text("""

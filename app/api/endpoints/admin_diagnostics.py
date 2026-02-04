@@ -83,6 +83,44 @@ async def diagnostics_db(
     }
 
 
+@router.get("/diagnostics/db/schema", summary="Check DB schema columns")
+async def diagnostics_db_schema(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin),
+):
+    """
+    Проверить наличие критичных колонок в tenants.
+    Помогает отловить "UndefinedColumnError".
+    """
+    required_tenants_columns = [
+        "amocrm_base_domain",
+        "whatsapp_source",
+        "ai_enabled_global",
+        "ai_after_lead_submitted_behavior",
+        "ai_prompt",
+        "webhook_key",
+    ]
+    
+    report = {"tenants": {}}
+    notes = []
+    
+    for col in required_tenants_columns:
+        try:
+            # Пытаемся выбрать конкретную колонку
+            await db.execute(text(f"SELECT {col} FROM tenants LIMIT 1"))
+            report["tenants"][col] = True
+        except Exception as e:
+            report["tenants"][col] = False
+            notes.append(f"tenants.{col} MISSING: {e}")
+            
+    return {
+        "ok": True,
+        "schema_report": report,
+        "notes": notes,
+        "status": "CRITICAL" if notes else "OK"
+    }
+
+
 @router.get("/diagnostics/leads-health", response_model=dict)
 async def diagnostics_leads_health(
     db: AsyncSession = Depends(get_db),

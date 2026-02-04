@@ -105,6 +105,7 @@ class TenantSettingsUpdate(BaseModel):
     ai_prompt: Optional[str] = None
     ai_after_lead_submitted_behavior: Optional[str] = None
     amocrm_base_domain: Optional[str] = None
+    clear_fields: Optional[list[str]] = Field(default_factory=list, description="Список полей для принудительной очистки")
 
 
 class TenantSettingsErrorResponse(BaseModel):

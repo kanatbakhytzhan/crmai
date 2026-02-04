@@ -461,6 +461,28 @@ async def update_tenant_settings(
     
     # Get only fields that were explicitly provided (exclude_unset=True)
     update_data = body.model_dump(exclude_unset=True)
+    clear_fields = set(body.clear_fields or [])
+    if "clear_fields" in update_data:
+        del update_data["clear_fields"]
+
+    # 1) Protect against accidental wipe by empty strings
+    # Keys to protect: ai_prompt, amocrm_base_domain, whatsapp_source
+    protected_keys = ["ai_prompt", "amocrm_base_domain", "whatsapp_source", "ai_after_lead_submitted_behavior"]
+    keys_to_remove = []
+
+    for k, v in update_data.items():
+        if k in protected_keys:
+            # If value is string and empty
+            if isinstance(v, str) and not v.strip():
+                # If NOT explicitly asked to clear -> ignore update
+                if k not in clear_fields:
+                    keys_to_remove.append(k)
+                    print(f"[ADMIN PATCH] PROTECTED: Ignored empty string update for '{k}' (not in clear_fields)")
+                else:
+                    print(f"[ADMIN PATCH] CLEARED: Empty string update for '{k}' accepted (in clear_fields)")
+    
+    for k in keys_to_remove:
+        del update_data[k]
     
     # Log what we're updating (mask ai_prompt if long)
     log_data = {}

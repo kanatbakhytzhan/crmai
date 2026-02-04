@@ -1668,9 +1668,13 @@ async def update_whatsapp_account(
     if phone_number_id is not None:
         acc.phone_number_id = (phone_number_id or "").strip() or None
     if chatflow_token is not None:
-        acc.chatflow_token = (chatflow_token or "").strip() or None
+        val = (chatflow_token or "").strip()
+        if val:
+            acc.chatflow_token = val
     if chatflow_instance_id is not None:
-        acc.chatflow_instance_id = (chatflow_instance_id or "").strip() or None
+        val = (chatflow_instance_id or "").strip()
+        if val:
+            acc.chatflow_instance_id = val
     if is_active is not None:
         acc.is_active = is_active
     if hasattr(acc, "updated_at"):

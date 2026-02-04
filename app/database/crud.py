@@ -1269,6 +1269,7 @@ async def update_tenant(
     whatsapp_source: Optional[str] = None,
     ai_enabled_global: Optional[bool] = None,
     ai_after_lead_submitted_behavior: Optional[str] = None,
+    amocrm_base_domain: Optional[str] = None,
 ) -> Optional[Tenant]:
     """Обновить tenant. Включает Universal Admin Console поля."""
     tenant = await get_tenant_by_id(db, tenant_id)
@@ -1294,6 +1295,15 @@ async def update_tenant(
         tenant.ai_enabled_global = ai_enabled_global
     if ai_after_lead_submitted_behavior is not None:
         tenant.ai_after_lead_submitted_behavior = ai_after_lead_submitted_behavior
+    if amocrm_base_domain is not None:
+        # Normalize: strip protocol and trailing slashes
+        domain = (amocrm_base_domain or "").strip()
+        if domain.startswith("https://"):
+            domain = domain[8:]
+        elif domain.startswith("http://"):
+            domain = domain[7:]
+        domain = domain.rstrip("/")
+        tenant.amocrm_base_domain = domain if domain else None
     await db.commit()
     await db.refresh(tenant)
     return tenant
@@ -1581,6 +1591,39 @@ async def list_whatsapp_accounts_by_tenant(
         select(WhatsAppAccount).where(WhatsAppAccount.tenant_id == tenant_id).order_by(WhatsAppAccount.id.asc())
     )
     return list(result.scalars().all())
+
+
+async def get_chatflow_binding_snapshot(db: AsyncSession, tenant_id: int) -> dict:
+    """
+    Get ChatFlow binding snapshot for tenant settings response.
+    Returns dict with is_active, phone_number, chatflow_instance_id, chatflow_token_masked, binding_exists.
+    """
+    accounts = await list_whatsapp_accounts_by_tenant(db, tenant_id)
+    if not accounts:
+        return {
+            "binding_exists": False,
+            "is_active": False,
+            "phone_number": None,
+            "chatflow_instance_id": None,
+            "chatflow_token_masked": None,
+        }
+    # Get first (or active) account
+    acc = next((a for a in accounts if a.is_active), accounts[0])
+    token = getattr(acc, "chatflow_token", None) or ""
+    # Mask token: first 4 chars + *** + last 2 chars
+    if len(token) > 6:
+        token_masked = token[:4] + "***" + token[-2:]
+    elif token:
+        token_masked = "***"
+    else:
+        token_masked = None
+    return {
+        "binding_exists": True,
+        "is_active": acc.is_active,
+        "phone_number": acc.phone_number or None,
+        "chatflow_instance_id": getattr(acc, "chatflow_instance_id", None),
+        "chatflow_token_masked": token_masked,
+    }
 
 
 async def update_whatsapp_account(

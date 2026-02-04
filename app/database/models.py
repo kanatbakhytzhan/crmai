@@ -26,6 +26,7 @@ class Tenant(Base):
     whatsapp_source = Column(String(32), default="chatflow", nullable=False)  # chatflow | amomarket
     ai_enabled_global = Column(Boolean, default=True, nullable=False)  # глобальный включатель AI
     ai_after_lead_submitted_behavior = Column(String(64), default="polite_close", nullable=True)  # polite_close | continue | silent
+    amocrm_base_domain = Column(String(255), nullable=True)  # e.g. "baxa.amocrm.ru" for AmoCRM integration
     created_at = Column(DateTime, default=datetime.utcnow)
 
     whatsapp_accounts = relationship("WhatsAppAccount", back_populates="tenant", cascade="all, delete-orphan")

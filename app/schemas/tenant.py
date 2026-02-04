@@ -45,12 +45,34 @@ class TenantResponse(BaseModel):
 
 # ========== Universal Admin Console: Tenant Settings ==========
 
+class ChatFlowBindingSnapshot(BaseModel):
+    """Snapshot of ChatFlow binding for tenant settings response."""
+    binding_exists: bool = False
+    is_active: bool = False
+    phone_number: Optional[str] = None
+    chatflow_instance_id: Optional[str] = None
+    chatflow_token_masked: Optional[str] = None
+
+
+class AmoCRMSnapshot(BaseModel):
+    """Snapshot of AmoCRM integration status for tenant settings response."""
+    connected: bool = False
+    is_active: bool = False
+    base_domain: Optional[str] = None
+    token_expires_at: Optional[datetime] = None
+
+
 class TenantSettingsResponse(BaseModel):
-    """GET /api/admin/tenants/{id}/settings"""
+    """GET /api/admin/tenants/{id}/settings - comprehensive response with all settings and snapshots."""
+    # Core settings
     whatsapp_source: str = "chatflow"
     ai_enabled_global: bool = True
     ai_prompt: Optional[str] = None
     ai_after_lead_submitted_behavior: str = "polite_close"
+    amocrm_base_domain: Optional[str] = None
+    # Snapshots for frontend
+    whatsapp: Optional[ChatFlowBindingSnapshot] = None
+    amocrm: Optional[AmoCRMSnapshot] = None
 
 
 class TenantSettingsUpdate(BaseModel):
@@ -59,13 +81,17 @@ class TenantSettingsUpdate(BaseModel):
     ai_enabled_global: Optional[bool] = None
     ai_prompt: Optional[str] = None
     ai_after_lead_submitted_behavior: Optional[str] = None
+    amocrm_base_domain: Optional[str] = None
 
 
 # ========== Universal Admin Console: AmoCRM ==========
 
 class AmoCRMAuthUrlResponse(BaseModel):
-    url: Optional[str] = None
-    error: Optional[str] = None
+    """Response for GET /api/admin/tenants/{id}/amocrm/auth-url"""
+    ok: bool = True
+    auth_url: Optional[str] = None
+    base_domain: Optional[str] = None
+    detail: Optional[str] = None  # Error message if ok=False
 
 
 class AmoCRMCallbackBody(BaseModel):

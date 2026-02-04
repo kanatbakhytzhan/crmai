@@ -538,6 +538,7 @@ async def init_db():
                     ("whatsapp_source", "VARCHAR(32) DEFAULT 'chatflow' NOT NULL"),
                     ("ai_enabled_global", "BOOLEAN DEFAULT TRUE NOT NULL"),
                     ("ai_after_lead_submitted_behavior", "VARCHAR(64) DEFAULT 'polite_close'"),
+                    ("amocrm_base_domain", "VARCHAR(255)"),
                 ]:
                     await conn.execute(text(f"ALTER TABLE tenants ADD COLUMN IF NOT EXISTS {col} {defn}"))
                 await conn.execute(text("UPDATE tenants SET whatsapp_source = 'chatflow' WHERE whatsapp_source IS NULL"))
@@ -706,7 +707,7 @@ async def init_db():
             except Exception as e:
                 print(f"[WARN] SQLite {tname}: {type(e).__name__}: {e}")
         # SQLite: new tenant columns
-        for col, typ in [("whatsapp_source", "VARCHAR(32) DEFAULT 'chatflow'"), ("ai_enabled_global", "INTEGER DEFAULT 1"), ("ai_after_lead_submitted_behavior", "VARCHAR(64) DEFAULT 'polite_close'")]:
+        for col, typ in [("whatsapp_source", "VARCHAR(32) DEFAULT 'chatflow'"), ("ai_enabled_global", "INTEGER DEFAULT 1"), ("ai_after_lead_submitted_behavior", "VARCHAR(64) DEFAULT 'polite_close'"), ("amocrm_base_domain", "VARCHAR(255)")]:
             try:
                 await conn.execute(text(f"ALTER TABLE tenants ADD COLUMN {col} {typ}"))
                 print(f"[OK] SQLite: tenants.{col} dobavlena")

@@ -118,6 +118,23 @@ async def init_db():
                     print("[OK] SQLite: whatsapp_accounts.updated_at uzhe est")
                 else:
                     print(f"[WARN] whatsapp_accounts.updated_at SQLite: {type(e).__name__}: {e}")
+            # SQLite: Universal Admin Console columns for tenants
+            for col, typ in [
+                ("ai_prompt", "TEXT"),
+                ("webhook_key", "VARCHAR(64)"),
+                ("whatsapp_source", "VARCHAR(32) DEFAULT 'chatflow'"),
+                ("ai_enabled_global", "INTEGER DEFAULT 1"),
+                ("ai_after_lead_submitted_behavior", "VARCHAR(64) DEFAULT 'polite_close'"),
+                ("amocrm_base_domain", "VARCHAR(255)"),
+            ]:
+                try:
+                    await conn.execute(text(f"ALTER TABLE tenants ADD COLUMN {col} {typ}"))
+                    print(f"[OK] SQLite: tenants.{col} dobavlena")
+                except Exception as e:
+                    if "duplicate column" in str(e).lower():
+                        print(f"[OK] SQLite: tenants.{col} uzhe est")
+                    else:
+                        print(f"[WARN] tenants.{col} SQLite: {type(e).__name__}: {e}")
         if "postgresql" in db_url:
             # tenant_id в leads (nullable)
             try:

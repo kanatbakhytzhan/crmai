@@ -204,16 +204,28 @@ async def get_amocrm_client(db: AsyncSession, tenant_id: int) -> AmoCRMClient | 
 
 
 def build_auth_url(tenant_id: int, base_domain: str) -> str | None:
-    """Сформировать URL для OAuth авторизации в amoCRM."""
+    """
+    Сформировать URL для OAuth2 авторизации в amoCRM.
+    
+    Правильный формат AmoCRM OAuth2:
+    https://{base_domain}/oauth2/authorize?client_id=...&redirect_uri=...&response_type=code&state=...
+    
+    НЕ ИСПОЛЬЗОВАТЬ /oauth или mode=post_message (устаревшие).
+    """
     settings = get_settings()
     if not settings.amo_client_id or not settings.amo_redirect_url:
         return None
+    
+    # URL-encode redirect_uri
+    from urllib.parse import quote
+    redirect_uri_encoded = quote(settings.amo_redirect_url, safe='')
+    
     state = f"tenant_{tenant_id}"
     return (
-        f"https://{base_domain}/oauth"
+        f"https://{base_domain}/oauth2/authorize"
         f"?client_id={settings.amo_client_id}"
-        f"&mode=post_message"
-        f"&redirect_uri={settings.amo_redirect_url}"
+        f"&redirect_uri={redirect_uri_encoded}"
+        f"&response_type=code"
         f"&state={state}"
     )
 

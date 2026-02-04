@@ -368,83 +368,87 @@ async def update_tenant_settings(
         print(f"[ERROR] update_tenant_settings access check failed: {type(e).__name__}: {e}")
         return _safe_json_error(f"Access check failed: {type(e).__name__}", 403)
     
+    # Prepare update data
+    update_data = body.model_dump(exclude_unset=True)
+    print(f"[INFO] update_tenant_settings: tenant_id={tenant_id}, fields to update: {list(update_data.keys())}")
+    
+    # Use raw SQL update for maximum compatibility
+    # This avoids ORM issues when columns might not exist in older schema
+    from sqlalchemy import text
+    
     try:
-        # Try ORM update first
-        tenant = await crud.update_tenant(
-            db,
-            tenant_id,
-            whatsapp_source=body.whatsapp_source,
-            ai_enabled_global=body.ai_enabled_global,
-            ai_prompt=body.ai_prompt,
-            ai_after_lead_submitted_behavior=body.ai_after_lead_submitted_behavior,
-            amocrm_base_domain=body.amocrm_base_domain,
-        )
-        if not tenant:
+        # Build UPDATE query dynamically
+        updates = []
+        params = {"tid": tenant_id}
+        
+        # Map request fields to DB columns
+        field_mapping = {
+            "whatsapp_source": "whatsapp_source",
+            "ai_enabled_global": "ai_enabled_global",
+            "ai_prompt": "ai_prompt",
+            "ai_after_lead_submitted_behavior": "ai_after_lead_submitted_behavior",
+            "amocrm_base_domain": "amocrm_base_domain",
+        }
+        
+        for req_field, db_field in field_mapping.items():
+            if req_field in update_data:
+                value = update_data[req_field]
+                # Normalize amocrm_base_domain
+                if req_field == "amocrm_base_domain" and value:
+                    value = _normalize_amocrm_domain(value)
+                updates.append(f"{db_field} = :{db_field}")
+                params[db_field] = value
+        
+        if updates:
+            # Try update with all fields first
+            try:
+                query = f"UPDATE tenants SET {', '.join(updates)} WHERE id = :tid"
+                await db.execute(text(query), params)
+                await db.commit()
+                print(f"[INFO] update_tenant_settings: updated tenant {tenant_id} with {len(updates)} fields")
+            except Exception as e:
+                error_str = str(e).lower()
+                # If specific column doesn't exist, try updating only core fields
+                if "column" in error_str or "does not exist" in error_str or "no such column" in error_str:
+                    print(f"[WARN] Some columns missing, trying core fields only: {e}")
+                    try:
+                        await db.rollback()
+                    except Exception:
+                        pass
+                    
+                    # Try only ai_prompt which should always exist
+                    if "ai_prompt" in update_data:
+                        core_query = "UPDATE tenants SET ai_prompt = :ai_prompt WHERE id = :tid"
+                        core_params = {"tid": tenant_id, "ai_prompt": update_data["ai_prompt"]}
+                        await db.execute(text(core_query), core_params)
+                        await db.commit()
+                        print(f"[INFO] update_tenant_settings: updated ai_prompt only for tenant {tenant_id}")
+                else:
+                    raise
+        
+        # Fetch updated tenant and return
+        tenant_data = await _get_tenant_with_fallback(db, tenant_id)
+        if not tenant_data:
             return JSONResponse(status_code=404, content={"ok": False, "detail": "Tenant not found"})
         
-        print(f"[INFO] update_tenant_settings: tenant_id={tenant_id}, updated fields={body.model_dump(exclude_unset=True)}")
-        
-        # Use the wrapper class for building response
         class TenantWrapper:
             def __init__(self, data):
                 for k, v in data.items():
                     setattr(self, k, v)
-        
-        tenant_data = await _get_tenant_with_fallback(db, tenant_id)
-        if not tenant_data:
-            return JSONResponse(status_code=404, content={"ok": False, "detail": "Tenant not found after update"})
         
         response = await _build_tenant_settings_response(db, tenant_id, TenantWrapper(tenant_data))
         return response
         
     except Exception as e:
         error_name = type(e).__name__
-        error_str = str(e)
-        print(f"[ERROR] update_tenant_settings ORM failed for tenant {tenant_id}: {error_name}: {e}")
-        
-        # Fallback: try raw SQL update for the fields that exist
-        if any(x in error_name for x in ["OperationalError", "ProgrammingError"]) or \
-           any(x in error_str for x in ["no such column", "column", "does not exist"]):
-            try:
-                await db.rollback()
-            except Exception:
-                pass
-            
-            try:
-                from sqlalchemy import text
-                # Build update query for fields that likely exist
-                updates = []
-                params = {"tid": tenant_id}
-                
-                # Only update fields that were actually provided
-                update_data = body.model_dump(exclude_unset=True)
-                
-                # These are the core fields that should exist
-                for field in ["ai_prompt"]:
-                    if field in update_data and update_data[field] is not None:
-                        updates.append(f"{field} = :{field}")
-                        params[field] = update_data[field]
-                
-                if updates:
-                    query = f"UPDATE tenants SET {', '.join(updates)} WHERE id = :tid"
-                    await db.execute(text(query), params)
-                    await db.commit()
-                    print(f"[INFO] update_tenant_settings: used raw SQL fallback for tenant {tenant_id}")
-                
-                # Fetch and return updated tenant
-                tenant_data = await _get_tenant_with_fallback(db, tenant_id)
-                if tenant_data:
-                    class TenantWrapper:
-                        def __init__(self, data):
-                            for k, v in data.items():
-                                setattr(self, k, v)
-                    response = await _build_tenant_settings_response(db, tenant_id, TenantWrapper(tenant_data))
-                    return response
-                    
-            except Exception as e2:
-                print(f"[ERROR] Raw SQL update also failed: {e2}")
-        
+        print(f"[ERROR] update_tenant_settings failed for tenant {tenant_id}: {error_name}: {e}")
         traceback.print_exc()
+        
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        
         return _safe_json_error(f"Failed to update settings: {error_name}")
 
 
@@ -1139,51 +1143,122 @@ async def tenant_self_check(
 
 @integrations_router.get("/amocrm/callback", include_in_schema=False, summary="OAuth callback от amoCRM")
 async def amocrm_public_callback(
-    code: str,
-    state: str,
-    referer: str = "",
+    code: str = Query(None, description="Authorization code from AmoCRM"),
+    state: str = Query(None, description="State parameter (tenant_ID)"),
+    referer: str = Query("", description="Referer header (optional)"),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Публичный callback для AmoCRM OAuth. amoCRM редиректит сюда с code и state=tenant_{id}.
-    Извлекаем tenant_id из state, определяем base_domain из referer.
+    Публичный callback для AmoCRM OAuth2.
+    AmoCRM редиректит сюда с code и state=tenant_{id}.
+    
+    Если code/state не переданы — показываем понятную ошибку 400.
     """
+    import os
     import re
-    from fastapi.responses import HTMLResponse
+    from fastapi.responses import HTMLResponse, RedirectResponse
+    
+    # Проверка: если нет code или state — это прямой заход, показываем ошибку
+    if not code or not state:
+        return HTMLResponse("""
+        <html>
+        <head><title>AmoCRM Callback</title></head>
+        <body style="font-family: sans-serif; text-align: center; padding: 50px;">
+            <h1>⚠️ Это callback URL для AmoCRM</h1>
+            <p>Этот URL предназначен для автоматической обработки OAuth-авторизации AmoCRM.</p>
+            <p>Чтобы подключить AmoCRM, перейдите в <strong>Админ-панель → Настройки тенанта → Интеграции</strong> и нажмите "Подключить AmoCRM".</p>
+            <p style="color: #888; margin-top: 30px;">Ошибка: отсутствуют обязательные параметры (code, state).</p>
+        </body>
+        </html>
+        """, status_code=400)
     
     # Извлекаем tenant_id из state
     match = re.match(r"tenant_(\d+)", state or "")
     if not match:
-        return HTMLResponse("<h1>Error</h1><p>Invalid state parameter</p>", status_code=400)
+        return HTMLResponse(f"""
+        <html>
+        <head><title>Error</title></head>
+        <body style="font-family: sans-serif; text-align: center; padding: 50px;">
+            <h1>❌ Ошибка авторизации</h1>
+            <p>Неверный параметр state: {state[:50] if state else '(пусто)'}</p>
+            <p>Попробуйте подключить AmoCRM заново через админ-панель.</p>
+        </body>
+        </html>
+        """, status_code=400)
     tenant_id = int(match.group(1))
     
-    # Определяем base_domain из referer (пример: https://example.amocrm.ru/...)
+    print(f"[INFO] AmoCRM callback: tenant_id={tenant_id}, code={code[:10]}...")
+    
+    # Определяем base_domain: СНАЧАЛА из tenant settings, потом из integration, потом из referer
     base_domain = None
-    if referer:
-        domain_match = re.search(r"https?://([^/]+\.amocrm\.\w+)", referer)
+    
+    # 1. Попробовать из tenant.amocrm_base_domain
+    try:
+        tenant_data = await _get_tenant_with_fallback(db, tenant_id)
+        if tenant_data:
+            base_domain = (tenant_data.get("amocrm_base_domain") or "").strip()
+    except Exception as e:
+        print(f"[WARN] Failed to get tenant for callback: {e}")
+    
+    # 2. Fallback: из существующей интеграции
+    if not base_domain:
+        try:
+            integration = await crud.get_tenant_integration(db, tenant_id, "amocrm")
+            if integration and integration.base_domain:
+                base_domain = integration.base_domain
+        except Exception as e:
+            print(f"[WARN] Failed to get integration: {e}")
+    
+    # 3. Fallback: из referer (менее надежно)
+    if not base_domain and referer:
+        domain_match = re.search(r"https?://([^/]+\.(amocrm\.ru|kommo\.com))", referer)
         if domain_match:
             base_domain = domain_match.group(1)
     
     if not base_domain:
-        # Fallback: попробовать получить из существующей интеграции
-        integration = await crud.get_tenant_integration(db, tenant_id, "amocrm")
-        if integration and integration.base_domain:
-            base_domain = integration.base_domain
+        return HTMLResponse("""
+        <html>
+        <head><title>Error</title></head>
+        <body style="font-family: sans-serif; text-align: center; padding: 50px;">
+            <h1>❌ Ошибка</h1>
+            <p>Не удалось определить домен AmoCRM.</p>
+            <p>Пожалуйста, введите домен (например, company.amocrm.ru) в настройках тенанта и попробуйте снова.</p>
+        </body>
+        </html>
+        """, status_code=400)
     
-    if not base_domain:
-        return HTMLResponse("<h1>Error</h1><p>Could not determine amoCRM domain. Please try again from admin panel.</p>", status_code=400)
+    print(f"[INFO] AmoCRM callback: exchanging code for tokens, domain={base_domain}")
     
+    # Обменять code на токены
     result = await amocrm_service.exchange_code_for_tokens(db, tenant_id, base_domain, code)
     if not result:
-        return HTMLResponse("<h1>Error</h1><p>Failed to exchange authorization code. Please try again.</p>", status_code=400)
+        return HTMLResponse("""
+        <html>
+        <head><title>Error</title></head>
+        <body style="font-family: sans-serif; text-align: center; padding: 50px;">
+            <h1>❌ Ошибка обмена кода</h1>
+            <p>Не удалось получить токены от AmoCRM.</p>
+            <p>Возможно, код авторизации истёк. Попробуйте подключить AmoCRM заново.</p>
+        </body>
+        </html>
+        """, status_code=400)
     
+    print(f"[INFO] AmoCRM callback: tokens saved for tenant {tenant_id}")
+    
+    # Redirect на frontend если FRONTEND_URL задан
+    frontend_url = os.getenv("FRONTEND_URL", "").strip()
+    if frontend_url:
+        redirect_url = f"{frontend_url.rstrip('/')}/admin/tenants?amocrm=connected&tenant_id={tenant_id}"
+        return RedirectResponse(url=redirect_url)
+    
+    # Fallback: показать HTML страницу успеха
     return HTMLResponse(f"""
     <html>
     <head><title>amoCRM Connected</title></head>
     <body style="font-family: sans-serif; text-align: center; padding: 50px;">
         <h1>✅ amoCRM подключена</h1>
         <p>Интеграция с amoCRM успешно настроена для tenant #{tenant_id}.</p>
-        <p>Вы можете закрыть это окно.</p>
+        <p>Вы можете закрыть это окно и вернуться в админ-панель.</p>
         <script>
             if (window.opener) {{
                 window.opener.postMessage({{ type: 'amocrm_connected', tenant_id: {tenant_id} }}, '*');

@@ -278,3 +278,63 @@ class AmoPipelineMappingResponse(BaseModel):
     """GET /api/admin/tenants/{id}/amocrm/pipeline-mapping"""
     primary_pipeline_id: Optional[str] = None
     mapping: dict[str, str] = {}
+
+
+# ========== WhatsApp Account Schemas ==========
+
+class WhatsAppAccountCreate(BaseModel):
+    """POST /api/admin/tenants/{id}/whatsapp - Create new WhatsApp account"""
+    chatflow_token: str
+    chatflow_instance_id: str
+    phone_number: Optional[str] = None
+    is_active: bool = True
+
+
+class WhatsAppAccountUpsert(BaseModel):
+    """PUT /api/admin/tenants/{id}/whatsapp - Upsert WhatsApp account"""
+    chatflow_token: Optional[str] = None
+    chatflow_instance_id: Optional[str] = None
+    phone_number: Optional[str] = None
+    is_active: bool = True
+
+
+class WhatsAppAccountResponse(BaseModel):
+    """Response for WhatsApp account operations"""
+    ok: bool = True
+    whatsapp: Optional[dict] = None
+    detail: Optional[str] = None
+
+
+class WhatsAppSaved(BaseModel):
+    """WhatsApp account data in responses"""
+    id: int
+    tenant_id: int
+    chatflow_token: str
+    chatflow_instance_id: str
+    phone_number: Optional[str] = None
+    is_active: bool = True
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    
+    class Config:
+        from_attributes = True
+
+
+class WhatsAppTestBody(BaseModel):
+    """POST /api/admin/tenants/{id}/whatsapp/test"""
+    to_phone: str
+    message: str = "Test message from BuildCRM"
+
+
+# ========== Me Endpoint Schemas ==========
+
+class MeAISettingsResponse(BaseModel):
+    """Response for GET/PATCH /api/me/ai-settings"""
+    ai_enabled: bool = True
+    ai_prompt: Optional[str] = None
+
+
+class MeAISettingsUpdate(BaseModel):
+    """Request for PATCH /api/me/ai-settings"""
+    ai_enabled: Optional[bool] = None
+    ai_prompt: Optional[str] = None

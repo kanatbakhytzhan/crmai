@@ -338,3 +338,37 @@ class MeAISettingsUpdate(BaseModel):
     """Request for PATCH /api/me/ai-settings"""
     ai_enabled: Optional[bool] = None
     ai_prompt: Optional[str] = None
+
+
+# ========== Auto-Assign Rules ==========
+
+class AutoAssignRuleCreate(BaseModel):
+    """POST /api/admin/auto-assign/rules - Create auto-assign rule"""
+    tenant_id: int
+    rule_type: str = "round_robin"  # round_robin | least_busy | specific_user
+    target_user_id: Optional[int] = None
+    is_active: bool = True
+    priority: int = 0
+
+
+class AutoAssignRuleUpdate(BaseModel):
+    """PATCH /api/admin/auto-assign/rules/{id} - Update auto-assign rule"""
+    rule_type: Optional[str] = None
+    target_user_id: Optional[int] = None
+    is_active: Optional[bool] = None
+    priority: Optional[int] = None
+
+
+class AutoAssignRuleResponse(BaseModel):
+    """Response for auto-assign rule operations"""
+    id: int
+    tenant_id: int
+    rule_type: str
+    target_user_id: Optional[int] = None
+    is_active: bool
+    priority: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    
+    class Config:
+        from_attributes = True

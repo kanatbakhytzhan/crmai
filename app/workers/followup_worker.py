@@ -175,23 +175,20 @@ async def process_pending_followup(db: AsyncSession, followup: LeadFollowup):
 async def run_followup_worker():
     """
     Main worker loop: check for pending followups every 60 seconds and process them
+    Includes retry logic with exponential backoff on database errors
     """
-    
-    # Import health endpoint update function
-    try:
-        from app.api.endpoints.worker_health import update_worker_tick
-        has_health_endpoint = True
-    except ImportError:
-        log.warning("[WORKER] worker_health endpoint not available, skipping health updates")
-        has_health_endpoint = False
+    # Import health module (avoids circular import with API endpoints)
+    from app.workers.health import update_tick
     
     log.info("[FOLLOWUP_WORKER] Starting followup worker (checks every 60s)")
     
+    consecutive_errors = 0
+    max_consecutive_errors = 5
+    
     while True:
         try:
-            # Update health status
-            if has_health_endpoint:
-                update_worker_tick()
+            # Update health tick
+            update_tick()
             
             async for db in get_async_session_generator():
                 now = datetime.utcnow()
@@ -213,11 +210,35 @@ async def run_followup_worker():
                         await process_pending_followup(db, followup)
                         # Small delay between sends to avoid rate limiting
                         await asyncio.sleep(1)
+                else:
+                    log.debug("[FOLLOWUP WORKER] No pending followups at this time")
                 
                 break  # Exit the async for loop after processing
+            
+            # Reset error counter on success
+            consecutive_errors = 0
                 
         except Exception as e:
-            log.error("[FOLLOWUP WORKER] Error in main loop: %s", type(e).__name__, exc_info=True)
+            consecutive_errors += 1
+            log.error(
+                "[FOLLOWUP WORKER] Error in main loop (%d/%d): %s", 
+                consecutive_errors, max_consecutive_errors, 
+                type(e).__name__, 
+                exc_info=True
+            )
+            
+            # Exponential backoff on consecutive errors
+            if consecutive_errors >= max_consecutive_errors:
+                backoff = min(300, 10 * (2 ** (consecutive_errors - max_consecutive_errors)))
+                log.error(
+                    "[FOLLOWUP WORKER] Too many consecutive errors, backing off for %ds", 
+                    backoff
+                )
+                await asyncio.sleep(backoff)
+            else:
+                # Short delay before retry
+                await asyncio.sleep(5)
+                continue
         
         # Wait before next check
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)
@@ -227,5 +248,25 @@ if __name__ == "__main__":
     """
     Run worker as standalone process:
     python -m app.workers.followup_worker
+    
+    Environment variables required:
+    - DATABASE_URL: PostgreSQL connection string (from Render)
     """
-    asyncio.run(run_followup_worker())
+    import sys
+    import os
+    
+    # Log startup info
+    log.info("=" * 60)
+    log.info("[FOLLOWUP_WORKER] Starting as standalone process")
+    log.info("[FOLLOWUP_WORKER] Python: %s", sys.version)
+    log.info("[FOLLOWUP_WORKER] DATABASE_URL: %s", 
+             "SET" if os.getenv("DATABASE_URL") else "NOT SET")
+    log.info("=" * 60)
+    
+    try:
+        asyncio.run(run_followup_worker())
+    except KeyboardInterrupt:
+        log.info("[FOLLOWUP_WORKER] Stopped by user (Ctrl+C)")
+    except Exception as e:
+        log.error("[FOLLOWUP_WORKER] Fatal error: %s", type(e).__name__, exc_info=True)
+        sys.exit(1)

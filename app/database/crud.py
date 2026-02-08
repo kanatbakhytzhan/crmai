@@ -980,6 +980,177 @@ async def delete_lead_comment(db: AsyncSession, comment_id: int) -> bool:
     return False
 
 
+# ========== LEAD CATEGORIES ==========
+
+async def get_lead_categories(
+    db: AsyncSession,
+    tenant_id: int,
+    active_only: bool = True
+) -> List["LeadCategory"]:
+    """Получить все категории для tenant."""
+    from app.database.models import LeadCategory
+    query = select(LeadCategory).where(LeadCategory.tenant_id == tenant_id)
+    if active_only:
+        query = query.where(LeadCategory.is_active == True)
+    query = query.order_by(LeadCategory.order_index, LeadCategory.id)
+    result = await db.execute(query)
+    return list(result.scalars().all())
+
+
+async def get_lead_category_by_key(
+    db: AsyncSession,
+    tenant_id: int,
+    key: str
+) -> Optional["LeadCategory"]:
+    """Получить категорию по ключу."""
+    from app.database.models import LeadCategory
+    result = await db.execute(
+        select(LeadCategory).where(
+            LeadCategory.tenant_id == tenant_id,
+            LeadCategory.key == key
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def create_or_update_lead_category(
+    db: AsyncSession,
+    tenant_id: int,
+    key: str,
+    label: str,
+    color: Optional[str] = None,
+    order_index: int = 0
+) -> "LeadCategory":
+    """Создать или обновить категорию."""
+    from app.database.models import LeadCategory
+    
+    # Проверить, существует ли категория
+    category = await get_lead_category_by_key(db, tenant_id, key)
+    
+    if category:
+        # Обновить существующую
+        category.label = label
+        if color is not None:
+            category.color = color
+        category.order_index = order_index
+        category.updated_at = datetime.utcnow()
+    else:
+        # Создать новую
+        category = LeadCategory(
+            tenant_id=tenant_id,
+            key=key,
+            label=label,
+            color=color,
+            order_index=order_index
+        )
+        db.add(category)
+    
+    await db.commit()
+    await db.refresh(category)
+    return category
+
+
+async def update_lead_category_key(
+    db: AsyncSession,
+    lead_id: int,
+    category_key: str,
+    current_user_id: int,
+    *,
+    multitenant_include_tenant_leads: bool = True
+) -> Optional[Lead]:
+    """
+    Обновить категорию лида и синхронизировать с AmoCRM.
+    
+    1. Проверить, что категория существует у tenant
+    2. Обновить поля category_* в лиде
+    3. Создать lead_event
+    4. Синхронизировать с AmoCRM (если интеграция активна)
+    """
+    # Получить лид
+    lead = await get_lead_by_id(
+        db, lead_id=lead_id, owner_id=current_user_id,
+        multitenant_include_tenant_leads=multitenant_include_tenant_leads
+    )
+    if not lead:
+        return None
+    
+    # Проверить tenant_id
+    tenant_id = lead.tenant_id
+    if not tenant_id:
+        # Для старых лидов без tenant_id, попробовать определить
+        tenant_id = await infer_tenant_id_for_lead(db, lead)
+    
+    if not tenant_id:
+        # Если tenant_id не найден, просто обновить category_key
+        lead.category_key = category_key
+        lead.category_label = None
+        lead.category_color = None
+        lead.category_order = None
+        await db.commit()
+        await db.refresh(lead)
+        return lead
+    
+    # Получить категорию
+    category = await get_lead_category_by_key(db, tenant_id, category_key)
+    if not category:
+        # Категория не найдена - ошибка валидации
+        return None
+    
+    # Обновить поля лида
+    old_category = lead.category_key
+    lead.category_key = category.key
+    lead.category_label = category.label
+    lead.category_color = category.color
+    lead.category_order = category.order_index
+    
+    await db.flush()
+    
+    # Создать lead_event
+    if old_category != category_key:
+        await create_lead_event(
+            db, tenant_id=tenant_id, lead_id=lead_id,
+            event_type="category_changed",
+            actor_user_id=current_user_id,
+            payload={
+                "old_category": old_category,
+                "new_category": category_key
+            }
+        )
+    
+    await db.commit()
+    await db.refresh(lead)
+    
+    # TODO: Синхронизировать с AmoCRM (вызвать amocrm_service)
+    # await sync_lead_category_to_amocrm(db, lead, category_key)
+    
+    return lead
+
+
+async def seed_default_categories(
+    db: AsyncSession,
+    tenant_id: int
+):
+    """Создать дефолтные категории для нового tenant."""
+    DEFAULT_CATEGORIES = [
+        {"key": "new", "label": "Новый", "color": "#3B82F6", "order": 0},
+        {"key": "hot", "label": "Горячий", "color": "#EF4444", "order": 1},
+        {"key": "warm", "label": "Теплый", "color": "#F59E0B", "order": 2},
+        {"key": "cold", "label": "Холодный", "color": "#6B7280", "order": 3},
+        {"key": "need_call", "label": "Нужен звонок", "color": "#8B5CF6", "order": 4},
+        {"key": "postponed", "label": "Отложен", "color": "#EC4899", "order": 5},
+        {"key": "not_target", "label": "Не целевой", "color": "#64748B", "order": 6},
+    ]
+    
+    for cat_data in DEFAULT_CATEGORIES:
+        await create_or_update_lead_category(
+            db, tenant_id=tenant_id,
+            key=cat_data["key"],
+            label=cat_data["label"],
+            color=cat_data["color"],
+            order_index=cat_data["order"]
+        )
+
+
 # ========== PIPELINES & STAGES (CRM v2) ==========
 
 DEFAULT_PIPELINE_NAME = "Основная"

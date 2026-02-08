@@ -76,6 +76,12 @@ class LeadResponse(BaseModel):
     source: Optional[str] = None
     external_source: Optional[str] = None
     external_id: Optional[str] = None
+    
+    # CRM v3: категории лидов
+    category_key: Optional[str] = None
+    category_label: Optional[str] = None
+    category_color: Optional[str] = None
+    category_order: Optional[int] = None
 
     model_config = {"from_attributes": True}
 
@@ -273,4 +279,50 @@ class LeadStatsResponse(BaseModel):
     ok: bool = True
     stats: dict[str, int]  # {"new": 15, "in_progress": 8, "done": 42, "cancelled": 3, "total": 68}
     last_updated: datetime
+    request_id: str
+
+
+# ========== Lead Category Schemas ==========
+
+class LeadCategoryBase(BaseModel):
+    """Base schema for lead category."""
+    key: str
+    label: str
+    color: Optional[str] = None
+    order_index: int = 0
+
+
+class LeadCategoryCreate(LeadCategoryBase):
+    """Schema for creating a lead category."""
+    pass
+
+
+class LeadCategoryUpdate(BaseModel):
+    """Schema for updating a lead category."""
+    label: Optional[str] = None
+    color: Optional[str] = None
+    order_index: Optional[int] = None
+    is_active: Optional[bool] = None
+
+
+class LeadCategoryResponse(LeadCategoryBase):
+    """Response schema for lead category."""
+    id: int
+    tenant_id: int
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+    
+    model_config = {"from_attributes": True}
+
+
+class LeadCategoryUpdateBody(BaseModel):
+    """Body for PATCH /api/leads/{id}/category."""
+    category_key: str
+
+
+class LeadCategoriesResponse(BaseModel):
+    """Response for GET /api/lead-categories."""
+    ok: bool = True
+    categories: list[LeadCategoryResponse]
     request_id: str

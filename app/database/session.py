@@ -716,6 +716,41 @@ async def init_db():
                 print("[OK] Tablica tenant_field_mappings proverena/sozdana")
             except Exception as e:
                 print(f"[WARN] tenant_field_mappings create: {type(e).__name__}: {e}")
+            # CRM v3: lead_categories (tenant-specific categories)
+            try:
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS lead_categories (
+                        id SERIAL PRIMARY KEY,
+                        tenant_id INTEGER NOT NULL REFERENCES tenants(id),
+                        key VARCHAR(64) NOT NULL,
+                        label VARCHAR(255) NOT NULL,
+                        color VARCHAR(32),
+                        order_index INTEGER NOT NULL DEFAULT 0,
+                        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(tenant_id, key)
+                    )
+                """))
+                await conn.execute(text("CREATE INDEX IF NOT EXISTS idx_lead_categories_tenant ON lead_categories(tenant_id, is_active)"))
+                print("[OK] Tablica lead_categories proverena/sozdana")
+            except Exception as e:
+                print(f"[WARN] lead_categories create: {type(e).__name__}: {e}")
+            # CRM v3: add category columns to leads
+            try:
+                for col, defn in [
+                    ("category_key", "VARCHAR(64)"),
+                    ("category_label", "VARCHAR(255)"),
+                    ("category_color", "VARCHAR(32)"),
+                    ("category_order", "INTEGER"),
+                ]:
+                    await conn.execute(text(f"ALTER TABLE leads ADD COLUMN IF NOT EXISTS {col} {defn}"))
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS idx_leads_category ON leads(tenant_id, category_key) WHERE tenant_id IS NOT NULL"
+                ))
+                print("[OK] CRM v3: kolonki leads.category_* provereny")
+            except Exception as e:
+                print(f"[WARN] leads category columns: {type(e).__name__}: {e}")
     if "sqlite" in db_url:
         try:
             await conn.execute(text(

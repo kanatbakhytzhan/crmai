@@ -34,6 +34,7 @@ class Tenant(Base):
     tenant_users = relationship("TenantUser", back_populates="tenant", cascade="all, delete-orphan")
     pipelines = relationship("Pipeline", back_populates="tenant", cascade="all, delete-orphan")
     integrations = relationship("TenantIntegration", back_populates="tenant", cascade="all, delete-orphan")
+    lead_categories = relationship("LeadCategory", back_populates="tenant", cascade="all, delete-orphan")
 
 
 class TenantUser(Base):
@@ -101,6 +102,24 @@ class TenantFieldMapping(Base):
     entity_type = Column(String(32), nullable=False)  # lead | contact
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class LeadCategory(Base):
+    """Категория лида (tenant-specific). Заменяет старую логику accept/reject."""
+    __tablename__ = "lead_categories"
+    __table_args__ = (UniqueConstraint("tenant_id", "key", name="uq_lead_category_tenant_key"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    key = Column(String(64), nullable=False)  # hot, warm, cold, not_target, need_call, postponed
+    label = Column(String(255), nullable=False)  # "Горячий", "Теплый", "Холодный"
+    color = Column(String(32), nullable=True)  # #FF5733 or token like "red-500"
+    order_index = Column(Integer, nullable=False, default=0)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    tenant = relationship("Tenant", back_populates="lead_categories")
 
 
 class WhatsAppAccount(Base):
@@ -310,6 +329,12 @@ class Lead(Base):
     pipeline_id = Column(Integer, ForeignKey("pipelines.id"), nullable=True)  # CRM v2 воронка
     stage_id = Column(Integer, ForeignKey("pipeline_stages.id"), nullable=True)
     moved_to_stage_at = Column(DateTime, nullable=True)
+    
+    # CRM v3: категории лидов (заменяет accept/reject)
+    category_key = Column(String(64), nullable=True)  # hot, warm, cold, not_target, etc.
+    category_label = Column(String(255), nullable=True)  # "Горячий", "Теплый"
+    category_color = Column(String(32), nullable=True)  # #FF5733
+    category_order = Column(Integer, nullable=True)  # для сортировки в UI
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

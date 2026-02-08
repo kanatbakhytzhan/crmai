@@ -18,7 +18,7 @@ from starlette.middleware.sessions import SessionMiddleware
 import uuid
 
 from app.database.session import init_db, drop_all_tables, engine, sync_engine, Base
-from app.api.endpoints import chat, auth, admin_users, admin_tenants, admin_diagnostics, admin_recovery, whatsapp_webhook, chatflow_webhook, me, leads_v2, pipelines, tasks, events, notifications, admin_import, admin_reports, admin_auto_assign, admin_universal
+from app.api.endpoints import chat, auth, admin_users, admin_tenants, admin_diagnostics, admin_recovery, whatsapp_webhook, chatflow_webhook, me, leads_v2, pipelines, tasks, events, notifications, admin_import, admin_reports, admin_auto_assign, admin_universal, lead_categories
 from app.services.telegram_service import stop_bot
 from app.admin import setup_admin
 
@@ -26,10 +26,9 @@ from app.admin import setup_admin
 # Без этого импорта таблицы не будут созданы!
 from app.database.models import (
     User, BotUser, Message, Lead, LeadComment, LeadEvent, AutoAssignRule, Tenant, TenantUser, WhatsAppAccount,
-    TenantIntegration, TenantPipelineMapping, TenantFieldMapping,
+    TenantIntegration, TenantPipelineMapping, TenantFieldMapping, LeadCategory,
     Conversation, ConversationMessage, ChatMute, ChatAIState,
-    Pipeline, PipelineStage, LeadTask,
-    AIChatMute, AuditLog, Notification,
+    Pipeline, PipelineStage, LeadTask, AIChatMute, AuditLog, Notification
 )
 from app.api.deps import get_db
 from app.api.endpoints import auth as auth_endpoints
@@ -233,6 +232,7 @@ app.include_router(admin_import.router, prefix="/api/admin", tags=["Import"])
 app.include_router(admin_reports.router, prefix="/api/admin", tags=["Reports"])
 app.include_router(admin_auto_assign.router, prefix="/api/admin", tags=["Auto Assign"])
 app.include_router(admin_universal.router, prefix="/api/admin", tags=["Universal Admin"])
+app.include_router(lead_categories.router, prefix="/api", tags=["Lead Categories"])
 app.include_router(admin_universal.integrations_router, prefix="/api/integrations", tags=["Integrations"])
 app.include_router(whatsapp_webhook.router, prefix="/api/whatsapp", tags=["WhatsApp Webhook"])
 app.include_router(chatflow_webhook.router, prefix="/api/chatflow", tags=["ChatFlow Webhook"])

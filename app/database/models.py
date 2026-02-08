@@ -510,18 +510,21 @@ class LeadFollowup(Base):
 class TenantStage(Base):
     """Owner-managed pipeline stage (Kanban column)"""
     __tablename__ = "tenant_stages"
-    __table_args__ = (UniqueConstraint("tenant_id", "key", name="uq_tenant_stage_key"),)
-
+    
     id = Column(Integer, primary_key=True, index=True)
-    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
-    key = Column(String(64), nullable=False)  # no_reply, in_work, wants_call, etc.
-    title_ru = Column(String(255), nullable=False)  # "Нет ответа"
-    title_kz = Column(String(255), nullable=False)  # "Zhauap zhok"
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    stage_key = Column(String(50), nullable=False)  # Renamed from key
+    title_ru = Column(String(100), nullable=False)
+    title_kz = Column(String(100), nullable=False)
+    color = Column(String(7), nullable=False, default='#94a3b8')
     order_index = Column(Integer, default=0, nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
-    color = Column(String(32), nullable=True)  # #FF5733
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "stage_key", name="unique_tenant_stage_key"),
+    )
 
     # Relationships
     tenant = relationship("Tenant", back_populates="stages")

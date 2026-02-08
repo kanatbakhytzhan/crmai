@@ -49,7 +49,7 @@ async def get_tenant_stage_by_key(
     result = await db.execute(
         select(TenantStage).where(
             TenantStage.tenant_id == tenant_id,
-            TenantStage.key == stage_key
+            TenantStage.stage_key == stage_key
         )
     )
     return result.scalar_one_or_none()
@@ -58,7 +58,7 @@ async def get_tenant_stage_by_key(
 async def create_tenant_stage(
     db: AsyncSession,
     tenant_id: int,
-    key: str,
+    stage_key: str,
     title_ru: str,
     title_kz: str,
     order_index: int = 0,
@@ -66,13 +66,13 @@ async def create_tenant_stage(
 ) -> TenantStage:
     """Create a new stage for tenant"""
     # Check for duplicate key
-    existing = await get_tenant_stage_by_key(db, tenant_id, key)
+    existing = await get_tenant_stage_by_key(db, tenant_id, stage_key)
     if existing:
         raise IntegrityError("duplicate_key", "Stage with this key already exists", None)
     
     stage = TenantStage(
         tenant_id=tenant_id,
-        key=key,
+        stage_key=stage_key,
         title_ru=title_ru,
         title_kz=title_kz,
         order_index=order_index,

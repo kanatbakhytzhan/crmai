@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
+from app.schemas.tenant_stage import LeadStageUpdateBody
 import logging
 
 from app.api.deps import get_db, get_current_user
@@ -113,3 +114,58 @@ async def set_lead_handoff(
             "followups_scheduled": scheduled,
             "message": "AI resumed" + (" & followups scheduled" if scheduled else "")
         }
+
+
+
+@router.patch("/{lead_id}/stage")
+async def change_lead_stage(
+    lead_id: int,
+    body: LeadStageUpdateBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Move lead to another stage (Kanban drag & drop).
+    
+    Validates that:
+    1. Lead exists and belongs to user's tenant
+    2. Target stage_key exists and is active for that tenant
+    """
+    from app.database import crud
+    from app.database.crud_stages import update_lead_stage, get_tenant_stage_by_key
+    
+    # 1. Get lead
+    lead = await crud.get_lead_by_id(db, lead_id, current_user.id, multitenant_include_tenant_leads=True)
+    if not lead:
+         raise HTTPException(status_code=404, detail="Lead not found or access denied")
+         
+    if not lead.tenant_id:
+        raise HTTPException(status_code=400, detail="Lead is not associated with a tenant")
+        
+    # 2. Validate stage exists and is active
+    stage = await get_tenant_stage_by_key(db, lead.tenant_id, body.stage_key)
+    if not stage or not stage.is_active:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid stage_key: '{body.stage_key}' does not exist or is inactive"
+        )
+        
+    # 3. Update lead
+    success = await update_lead_stage(
+        db,
+        lead_id=lead.id,
+        stage_key=body.stage_key,
+        auto_moved=False, # Manual move
+        reason=body.reason or "Manual update via API"
+    )
+    
+    if success:
+        await db.refresh(lead)
+        return {
+            "id": lead.id,
+            "stage_key": lead.stage_key,
+            "updated_at": lead.updated_at
+            # "updated_at": lead.stage_updated_at # if available
+        }
+    else:
+        raise HTTPException(status_code=500, detail="Failed to update lead stage")

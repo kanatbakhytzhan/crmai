@@ -519,7 +519,22 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
             except Exception as followup_err:
                 log.error("[FOLLOWUP] Error cancelling: %s", type(followup_err).__name__)
             
-            # TODO Phase D: Trigger AmoCRM sync if category changed
+            
+            # PHASE D: Trigger AmoCRM sync if category changed
+            if old_category != new_category and new_category != 'no_reply':
+                try:
+                    from app.services.amocrm_service import AmoCRMService
+                    amo = AmoCRMService(db)
+                    tenant = await crud.get_tenant_by_id(db, tenant_id)
+                    if tenant and getattr(tenant, 'amocrm_base_domain', None):
+                        sync_result = await amo.sync_lead_to_amocrm_by_category(lead, tenant)
+                        if sync_result.get('ok'):
+                            log.info("[AMO_SYNC] ✅ Synced lead %s to AmoCRM (category=%s → stage=%s)", 
+                                    lead.id, new_category, sync_result.get('stage_key'))
+                        else:
+                            log.warning("[AMO_SYNC] Failed: %s", sync_result.get('reason'))
+                except Exception as amo_err:
+                    log.error("[AMO_SYNC] Error: %s", type(amo_err).__name__, exc_info=True)
             
         except Exception as e:
             log.error("[CATEGORIZATION] Error processing lead %s: %s", getattr(lead, 'id', '?'), type(e).__name__, exc_info=True)

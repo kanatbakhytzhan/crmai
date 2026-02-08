@@ -18,7 +18,7 @@ from starlette.middleware.sessions import SessionMiddleware
 import uuid
 
 from app.database.session import init_db, drop_all_tables, engine, sync_engine, Base
-from app.api.endpoints import chat, auth, admin_users, admin_tenants, admin_diagnostics, admin_recovery, whatsapp_webhook, chatflow_webhook, me, leads_v2, pipelines, tasks, events, notifications, admin_import, admin_reports, admin_auto_assign, admin_universal, lead_categories
+from app.api.endpoints import chat, auth, admin_users, admin_tenants, admin_diagnostics, admin_recovery, whatsapp_webhook, chatflow_webhook, me, leads_v2, pipelines, tasks, events, notifications, admin_import, admin_reports, admin_auto_assign, admin_universal, lead_categories, leads
 from app.services.telegram_service import stop_bot
 from app.admin import setup_admin
 
@@ -241,6 +241,7 @@ app.include_router(pipelines.router, prefix="/api", tags=["Pipelines"])
 app.include_router(tasks.router, prefix="/api", tags=["Tasks"])
 app.include_router(events.router, prefix="/api", tags=["Events"])
 app.include_router(notifications.router, prefix="/api", tags=["Notifications"])
+app.include_router(leads.router, prefix="/api", tags=["Leads"])  # Phase E: Handoff endpoint
 
 # Подключение админ-панели (используем СИНХРОННЫЙ engine!)
 setup_admin(app, sync_engine)

@@ -327,4 +327,130 @@ class AmoCRMService:
                 log.info(f"Moving lead {lead_id} to {target_stage_key} ({status_id}) based on rule")
                 await self._update_lead_status(integ, lead_id, status_id)
 
-
+    # =================================================================
+    # PHASE D: Category-Based Le Sync
+    # =================================================================
+    
+    async def sync_lead_to_amocrm_by_category(
+        self,
+        lead: models.Lead,
+        tenant: models.Tenant
+    ) -> Dict[str, Any]:
+        """
+        Sync lead to AmoCRM based on current category
+        
+        Maps lead.category to AmoCRM stage via tenant_category_stage_mappings
+        and tenant_pipeline_mappings tables.
+        
+        Returns:
+            {ok: bool, lead_id: int, status_id: int} or {ok: False, reason: str}
+        """
+        try:
+            integ = await self._get_integration(tenant.id)
+            if not integ:
+                return {"ok": False, "reason": "No AmoCRM integration"}
+            
+            # Get category
+            category = getattr(lead, 'category', None)
+            if not category:
+                log.info(f"[AMO_SYNC] Lead {lead.id} has no category, skip sync")
+                return {"ok": False, "reason": "No category"}
+            
+            # Get category → stage_key mapping
+            from app.database.models import TenantCategoryStageMapping
+            cat_mapping_result = await self.db.execute(
+                select(TenantCategoryStageMapping.stage_key).where(
+                    TenantCategoryStageMapping.tenant_id == tenant.id,
+                    TenantCategoryStageMapping.category == category,
+                    TenantCategoryStageMapping.is_active == True
+                )
+            )
+            stage_key = cat_mapping_result.scalar()
+            
+            if not stage_key:
+                log.warning(f"[AMO_SYNC] No stage_key mapping for category '{category}' in tenant {tenant.id}")
+                # Use default mapping
+                default_mappings = {
+                    'no_reply': 'UNREAD',
+                    'wants_call': 'CALL_1',
+                    'partial_data': 'IN_WORK',
+                    'full_data': 'MEASUREMENT_ASSIGNED',
+                    'measurement_done': 'AFTER_MEASUREMENT_REJECT',
+                    'won': 'WON',
+                    'rejected': 'LOST'
+                }
+                stage_key = default_mappings.get(category, 'NEW')
+            
+            # Get stage_key → stage_id mapping from tenant_pipeline_mappings
+            status_id = await self._get_mapped_status(tenant.id, stage_key)
+            
+            if not status_id:
+                log.warning(f"[AMO_SYNC] No status_id for stage_key '{stage_key}' in tenant {tenant.id}")
+                return {"ok": False, "reason": f"No status_id mapped for stage_key={stage_key}"}
+            
+            # Get phone from extracted_fields or lead.phone
+            extracted = getattr(lead, 'extracted_fields', None) or {}
+            phone = extracted.get('phone') or getattr(lead, 'phone', None)
+            
+            if not phone:
+                # Try to get from bot_user
+                bot_user_id = getattr(lead, 'bot_user_id', None)
+                if bot_user_id:
+                    bot_user_result = await self.db.execute(
+                        select(models.BotUser.user_id).where(models.BotUser.id == bot_user_id)
+                    )
+                    jid = bot_user_result.scalar()
+                    if jid and '@' in jid:
+                        phone = jid.split('@')[0]
+            
+            if not phone:
+                log.warning(f"[AMO_SYNC] Lead {lead.id} has no phone")
+                return {"ok": False, "reason": "No phone"}
+            
+            # Get name
+            name = extracted.get('name') or getattr(lead, 'name', 'Клиент')
+            city = extracted.get('city') or getattr(lead, 'city', None)
+            
+            # Find or create contact
+            contact_id = await self._find_contact_by_phone(integ, phone)
+            if not contact_id:
+                contact_id = await self._create_contact(integ, name=name, phone=phone)
+                log.info(f"[AMO_SYNC] Created contact {contact_id} for lead {lead.id}")
+            
+            # Find active AmoCRM lead
+            amo_lead_id = await self._find_active_lead(integ, contact_id)
+            
+            pipeline_id = getattr(tenant, 'default_pipeline_id', None)
+            
+            if not amo_lead_id:
+                # Create new AmoCRM lead
+                amo_lead_id = await self._create_lead(
+                    integ,
+                    contact_id,
+                    title=f"WhatsApp: {name}" + (f" ({city})" if city else ""),
+                    pipeline_id=int(pipeline_id) if pipeline_id else None,
+                    status_id=int(status_id)
+                )
+                log.info(f"[AMO_SYNC] Created AmoCRM lead {amo_lead_id} for lead {lead.id}, status={status_id}")
+            else:
+                # Update existing lead status
+                await self._update_lead_status(integ, amo_lead_id, int(status_id))
+                log.info(f"[AMO_SYNC] Updated AmoCRM lead {amo_lead_id} to status={status_id} (category={category})")
+            
+            # Update lead.external_id if not set
+            if not getattr(lead, 'external_id', None):
+                lead.external_id = str(amo_lead_id)
+                lead.external_source = 'amocrm'
+                await self.db.commit()
+            
+            return {
+                "ok": True,
+                "lead_id": amo_lead_id,
+                "contact_id": contact_id,
+                "status_id": status_id,
+                "stage_key": stage_key
+            }
+            
+        except Exception as e:
+            log.error(f"[AMO_SYNC] Error syncing lead {lead.id}: {type(e).__name__} - {e}", exc_info=True)
+            return {"ok": False, "reason": str(e)}

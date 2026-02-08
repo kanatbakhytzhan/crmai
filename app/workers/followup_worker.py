@@ -173,13 +173,25 @@ async def process_pending_followup(db: AsyncSession, followup: LeadFollowup):
 
 
 async def run_followup_worker():
-    """
-    Main worker loop: check for pending followups every 60 seconds and process them
-    """
-    log.info("[FOLLOWUP WORKER] Starting...")
+  async def main():
+    """Main worker loop - processes pending followups every 60 seconds"""
+    
+    # Import health endpoint update function
+    try:
+        from app.api.endpoints.worker_health import update_worker_tick
+        has_health_endpoint = True
+    except ImportError:
+        log.warning("[WORKER] worker_health endpoint not available, skipping health updates")
+        has_health_endpoint = False
+    
+    log.info("[FOLLOWUP_WORKER] Starting followup worker (checks every 60s)")
     
     while True:
         try:
+            # Update health status
+            if has_health_endpoint:
+                update_worker_tick()
+            
             async for db in get_async_session_generator():
                 now = datetime.utcnow()
                 

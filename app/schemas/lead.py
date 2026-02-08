@@ -15,6 +15,18 @@ class LeadStatusEnum(str, Enum):
     FAILED = "failed"
 
 
+class CategoryEnum(str, Enum):
+    """AI CRM Manager категории лидов"""
+    NO_REPLY = "no_reply"
+    WANTS_CALL = "wants_call"
+    PARTIAL_DATA = "partial_data"
+    FULL_DATA = "full_data"
+    MEASUREMENT_ASSIGNED = "measurement_assigned"
+    MEASUREMENT_DONE = "measurement_done"
+    REJECTED = "rejected"
+    WON = "won"
+
+
 class LeadCreate(BaseModel):
     """Схема для создания заявки"""
     bot_user_id: int
@@ -82,6 +94,14 @@ class LeadResponse(BaseModel):
     category_label: Optional[str] = None
     category_color: Optional[str] = None
     category_order: Optional[int] = None
+    
+    # AI CRM Manager fields (Phase A-F)
+    category: Optional[str] = None  # no_reply, wants_call, partial_data, full_data
+    lead_score: Optional[str] = None  # hot, warm, cold
+    handoff_mode: Optional[str] = None  # ai | human
+    extracted_fields: Optional[dict] = None  # JSON data from conversation
+    last_inbound_at: Optional[datetime] = None  # last message FROM client
+    last_outbound_at: Optional[datetime] = None  # last message TO client
 
     model_config = {"from_attributes": True}
 
@@ -162,11 +182,14 @@ class LeadBulkAssignBody(BaseModel):
 
 
 class LeadPatchBody(BaseModel):
-    """PATCH /api/leads/{id} — status, next_call_at, last_contact_at, assigned_user_id (owner/rop)."""
+    """PATCH /api/leads/{id} — status, next_call_at, last_contact_at, assigned_user_id, category, handoff_mode (owner/rop)."""
     status: Optional[str] = None
     next_call_at: Optional[datetime] = None
     last_contact_at: Optional[datetime] = None
     assigned_user_id: Optional[int] = None
+    # AI CRM Manager fields
+    category: Optional[CategoryEnum] = None
+    handoff_mode: Optional[Literal['ai', 'human']] = None
 
 
 class LeadStageBody(BaseModel):

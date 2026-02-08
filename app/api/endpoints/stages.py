@@ -8,8 +8,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 import logging
 
-from app.database.session import get_async_session
 from app.api.dependencies import get_current_user
+from app.api.deps import get_db
 from app.database.models import User, TenantUser
 from app.database import crud
 from app.database.crud_stages import (
@@ -80,7 +80,7 @@ async def require_stage_manage_access(db: AsyncSession, user: User, tenant_id: i
 @router.get("/tenants/me/stages", response_model=TenantStagesResponse)
 async def list_my_stages(
     active_only: bool = True,
-    db: AsyncSession = Depends(get_async_session),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Get all stages for current user's tenant"""
@@ -98,7 +98,7 @@ async def list_my_stages(
 @router.post("/stages", response_model=TenantStageResponse, status_code=status.HTTP_201_CREATED)
 async def create_new_stage(
     body: TenantStageCreate,
-    db: AsyncSession = Depends(get_async_session),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Create new stage"""
@@ -137,7 +137,7 @@ async def create_new_stage(
 async def update_existing_stage(
     stage_id: int,
     body: TenantStageUpdate,
-    db: AsyncSession = Depends(get_async_session),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Update stage"""
@@ -165,7 +165,7 @@ async def update_existing_stage(
 @router.put("/stages/reorder", response_model=dict)
 async def reorder_pipeline_stages(
     body: TenantStageReorderBody,
-    db: AsyncSession = Depends(get_async_session),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """bulk reorder"""
@@ -183,7 +183,7 @@ async def reorder_pipeline_stages(
 async def archive_stage(
     stage_id: int,
     force: bool = False,
-    db: AsyncSession = Depends(get_async_session),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Archive stage (soft delete)"""

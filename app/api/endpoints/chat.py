@@ -24,6 +24,8 @@ from app.schemas.lead import (
     LeadStageBody,
     LeadSelectionBody,
     LeadAssignPlanBody,
+    LeadListResponse,
+    LeadStatsResponse,
 )
 from app.services import openai_service, telegram_service, conversation_service
 from app.services.events_bus import emit as events_emit
@@ -256,24 +258,98 @@ async def chat(
 
 @router.get("/leads", summary="Список лидов")
 async def get_leads(
+    request: Request,
+    status: Optional[str] = None,
+    q: Optional[str] = None,
+    page: int = 1,
+    limit: int = 50,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
-    Получить заявки: owner/rop — все лиды tenant; manager — только назначенные себе.
-    Поля: assigned_user_id, assigned_user_email, assigned_user_name, tenant_id, lead_number, next_call_at, last_contact_at.
+    Получить заявки с фильтрами и пагинацией.
+    
+    Query Parameters:
+    - status (optional): Фильтр по статусу (new, in_progress, success, failed)
+    - q (optional): Поиск по имени, телефону, городу, summary
+    - page (optional, default=1): Номер страницы
+    - limit (optional, default=50): Количество элементов на странице
+    
+    Returns:
+    - ok: true
+    - leads: Список лидов с полями для desktop и mobile
+    - total: Общее количество лидов (до фильтров)
+    - page: Текущая страница
+    - limit: Лимит на странице
+    - request_id: UUID запроса
     """
+    from app.api.error_handler import get_request_id
+    
     settings = get_settings()
     multitenant = (getattr(settings, "multitenant_enabled", "false") or "false").upper() == "TRUE"
+    
+    # Получить все лиды пользователя
     if multitenant:
-        leads = await crud.get_leads_for_user_crm(db, user_id=current_user.id)
+        all_leads = await crud.get_leads_for_user_crm(db, user_id=current_user.id)
     else:
-        leads = await crud.get_user_leads(db, owner_id=current_user.id, multitenant_include_tenant_leads=False)
+        all_leads = await crud.get_user_leads(db, owner_id=current_user.id, multitenant_include_tenant_leads=False)
+    
+    # Фильтрация по статусу
+    if status:
+        status_lower = status.strip().lower()
+        filtered_leads = []
+        for l in all_leads:
+            lead_status = l.status
+            if hasattr(lead_status, "value"):
+                lead_status_str = lead_status.value
+            else:
+                lead_status_str = str(lead_status) if lead_status else "new"
+            
+            # Поддержка алиасов: success=done, failed=cancelled
+            if status_lower in ("success", "done") and lead_status_str in ("done", "success"):
+                filtered_leads.append(l)
+            elif status_lower in ("failed", "cancelled") and lead_status_str in ("cancelled", "failed"):
+                filtered_leads.append(l)
+            elif lead_status_str == status_lower:
+                filtered_leads.append(l)
+        all_leads = filtered_leads
+    
+    # Поиск по тексту
+    if q and q.strip():
+        search_lower = q.strip().lower()
+        filtered_leads = []
+        for l in all_leads:
+            if (search_lower in (l.name or "").lower() or
+                search_lower in (l.phone or "").lower() or
+                search_lower in (l.city or "").lower() or
+                search_lower in (l.summary or "").lower()):
+                filtered_leads.append(l)
+        all_leads = filtered_leads
+    
+    # Сортировка по updated_at DESC (или created_at если updated_at нет)
+    all_leads.sort(key=lambda l: getattr(l, "updated_at", None) or l.created_at or datetime.min, reverse=True)
+    
+    total = len(all_leads)
+    
+    # Пагинация
+    start_idx = (page - 1) * limit
+    end_idx = start_idx + limit
+    paginated_leads = all_leads[start_idx:end_idx]
+    
+    # Формирование ответа с дополнительными полями
     leads_data = []
-    for l in leads:
+    for l in paginated_leads:
         item = LeadResponse.model_validate(l).model_dump()
+        
+        # Последний комментарий (preview)
         last_c = await crud.get_last_lead_comment(db, l.id)
         item["last_comment"] = (last_c.text[:100] if last_c and last_c.text else None) if last_c else None
+        
+        # Последнее сообщение из conversation (для мобильных карточек)
+        last_msg = await crud.get_last_conversation_message(db, l.id)
+        item["last_message_preview"] = last_msg
+        
+        # Assigned user info
         aid = getattr(l, "assigned_user_id", None)
         item["assigned_to_user_id"] = aid
         item["assigned_at"] = getattr(l, "assigned_at", None)
@@ -282,8 +358,49 @@ async def get_leads(
             if u:
                 item["assigned_user_email"] = u.email
                 item["assigned_user_name"] = getattr(u, "company_name", None)
+        
+        # updated_at для сортировки на фронте
+        item["updated_at"] = getattr(l, "updated_at", None) or l.created_at
+        
         leads_data.append(item)
-    return {"leads": leads_data, "total": len(leads_data)}
+    
+    request_id = get_request_id(request)
+    return {
+        "ok": True,
+        "leads": leads_data,
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "request_id": request_id,
+    }
+
+
+@router.get("/leads/stats", summary="Статистика по лидам", response_model=LeadStatsResponse)
+async def get_leads_stats_endpoint(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Получить статистику по лидам (counts по статусам) для вкладок UI.
+    
+    Returns:
+    - ok: true
+    - stats: {"new": 15, "in_progress": 8, "done": 42, "cancelled": 3, "total": 68}
+    - last_updated: Timestamp последнего обновления
+    - request_id: UUID запроса
+    """
+    from app.api.error_handler import get_request_id
+    
+    stats = await crud.get_leads_stats(db, user_id=current_user.id)
+    request_id = get_request_id(request)
+    
+    return LeadStatsResponse(
+        ok=True,
+        stats=stats,
+        last_updated=datetime.utcnow(),
+        request_id=request_id,
+    )
 
 
 @router.get("/leads/{lead_id}", summary="Один лид по ID")

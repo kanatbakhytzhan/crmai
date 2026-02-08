@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
+import uuid
 
 from app.database.session import init_db, drop_all_tables, engine, sync_engine, Base
 from app.api.endpoints import chat, auth, admin_users, admin_tenants, admin_diagnostics, admin_recovery, whatsapp_webhook, chatflow_webhook, me, leads_v2, pipelines, tasks, events, notifications, admin_import, admin_reports, admin_auto_assign, admin_universal
@@ -134,15 +135,27 @@ app.add_middleware(
 )
 
 
+class _RequestIDMiddleware(BaseHTTPMiddleware):
+    """Generate and attach request_id to all requests."""
+    async def dispatch(self, request: Request, call_next):
+        request_id = str(uuid.uuid4())
+        request.state.request_id = request_id
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+
 class _LogOriginMiddleware(BaseHTTPMiddleware):
     """Log request Origin for /api/* so Render logs show exact origin seen."""
     async def dispatch(self, request: Request, call_next):
         if request.url.path.startswith("/api/"):
             origin = request.headers.get("origin") or "(none)"
-            print(f"[CORS] Request Origin: {origin!r} | path={request.url.path} method={request.method}")
+            request_id = getattr(request.state, "request_id", "unknown")
+            print(f"[{request_id}] Request: {request.method} {request.url.path} | Origin: {origin!r}")
         return await call_next(request)
 
 
+app.add_middleware(_RequestIDMiddleware)
 app.add_middleware(_LogOriginMiddleware)
 
 
@@ -151,17 +164,38 @@ app.add_middleware(_LogOriginMiddleware)
 async def global_exception_handler(request: Request, exc: Exception):
     """Catch all unhandled exceptions and return JSON with CORS headers."""
     import traceback
-    origin = request.headers.get("origin", "")
+    from app.api.error_handler import APIError, get_request_id
     
-    # Log the error
-    print(f"[ERROR] Unhandled exception: {type(exc).__name__}: {exc}")
+    origin = request.headers.get("origin", "")
+    request_id = get_request_id(request)
+    
+    # Log the error with request_id
+    print(f"[{request_id}] [ERROR] Unhandled exception: {type(exc).__name__}: {exc}")
     traceback.print_exc()
     
-    # Build response
-    response = JSONResponse(
-        status_code=500,
-        content={"ok": False, "detail": f"Internal server error: {type(exc).__name__}"}
-    )
+    # Handle APIError with consistent format
+    if isinstance(exc, APIError):
+        response = JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "ok": False,
+                "code": exc.code,
+                "message": exc.message,
+                "details": exc.details,
+                "request_id": request_id,
+            }
+        )
+    else:
+        # Build response for unexpected errors
+        response = JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "code": "INTERNAL_ERROR",
+                "message": f"Internal server error: {type(exc).__name__}",
+                "request_id": request_id,
+            }
+        )
     
     # Add CORS headers manually if origin is allowed
     allowed_origins = _origins_list + ["https://buildcrm-pwa.vercel.app"]

@@ -853,6 +853,85 @@ async def get_last_lead_comment(db: AsyncSession, lead_id: int) -> Optional[Lead
     return result.scalar_one_or_none()
 
 
+async def get_leads_stats(
+    db: AsyncSession,
+    user_id: int,
+) -> dict[str, int]:
+    """
+    Получить статистику по лидам (counts по статусам) для текущего пользователя.
+    Возвращает: {"new": 15, "in_progress": 8, "done": 42, "cancelled": 3, "total": 68}
+    """
+    leads = await get_leads_for_user_crm(db, user_id, limit=10000)
+    stats = {
+        "new": 0,
+        "in_progress": 0,
+        "done": 0,
+        "cancelled": 0,
+        "total": len(leads),
+    }
+    for lead in leads:
+        status = lead.status
+        if hasattr(status, "value"):
+            status_str = status.value
+        else:
+            status_str = str(status) if status else "new"
+        
+        if status_str == "new":
+            stats["new"] += 1
+        elif status_str == "in_progress":
+            stats["in_progress"] += 1
+        elif status_str in ("done", "success"):
+            stats["done"] += 1
+        elif status_str in ("cancelled", "failed"):
+            stats["cancelled"] += 1
+    
+    return stats
+
+
+async def get_last_conversation_message(db: AsyncSession, lead_id: int) -> Optional[str]:
+    """
+    Получить preview последнего сообщения из conversation для лида (для мобильных карточек).
+    Возвращает первые 100 символов последнего user-сообщения.
+    """
+    # Найти лид и его bot_user
+    result = await db.execute(select(Lead).where(Lead.id == lead_id))
+    lead = result.scalar_one_or_none()
+    if not lead:
+        return None
+    
+    bot_user = await get_bot_user_by_id(db, lead.bot_user_id)
+    if not bot_user:
+        return None
+    
+    remote_jid = bot_user.user_id or ""
+    if not remote_jid.strip():
+        return None
+    
+    # Найти conversation
+    result = await db.execute(
+        select(Conversation)
+        .where(Conversation.external_id == remote_jid.strip())
+        .order_by(Conversation.id.desc())
+        .limit(1)
+    )
+    conv = result.scalar_one_or_none()
+    if not conv:
+        return None
+    
+    # Последнее user-сообщение
+    result = await db.execute(
+        select(ConversationMessage)
+        .where(ConversationMessage.conversation_id == conv.id)
+        .where(ConversationMessage.role == "user")
+        .order_by(ConversationMessage.created_at.desc())
+        .limit(1)
+    )
+    msg = result.scalar_one_or_none()
+    if not msg:
+        return None
+    
+    text = msg.text or ""
+    return text[:100] if len(text) > 100 else text
 async def create_lead_comment(
     db: AsyncSession,
     lead_id: int,

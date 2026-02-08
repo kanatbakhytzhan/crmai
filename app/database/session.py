@@ -422,12 +422,32 @@ async def init_db():
                     await conn.execute(text(
                         "ALTER TABLE leads ADD COLUMN IF NOT EXISTS last_contact_at TIMESTAMP"
                     ))
-                    await conn.execute(text(
-                        "CREATE INDEX IF NOT EXISTS idx_leads_tenant_id ON leads(tenant_id) WHERE tenant_id IS NOT NULL"
-                    ))
-                    await conn.execute(text(
-                        "CREATE INDEX IF NOT EXISTS idx_leads_assigned_user_id ON leads(assigned_user_id) WHERE assigned_user_id IS NOT NULL"
-                    ))
+                    await conn.execute(
+                        text(
+                            "CREATE INDEX IF NOT EXISTS idx_leads_tenant_id ON leads(tenant_id) WHERE tenant_id IS NOT NULL"
+                        )
+                    )
+                    await conn.execute(
+                        text(
+                            "CREATE INDEX IF NOT EXISTS idx_leads_assigned_user_id ON leads(assigned_user_id) WHERE assigned_user_id IS NOT NULL"
+                        )
+                    )
+                    # New indexes for performance (CRM v3)
+                    await conn.execute(
+                        text(
+                            "CREATE INDEX IF NOT EXISTS idx_leads_updated_at ON leads(updated_at DESC) WHERE updated_at IS NOT NULL"
+                        )
+                    )
+                    await conn.execute(
+                        text(
+                            "CREATE INDEX IF NOT EXISTS idx_leads_status_created ON leads(status, created_at DESC)"
+                        )
+                    )
+                    await conn.execute(
+                        text(
+                            "CREATE INDEX IF NOT EXISTS idx_leads_tenant_status ON leads(tenant_id, status) WHERE tenant_id IS NOT NULL"
+                        )
+                    )
                     await conn.execute(text(
                         "ALTER TABLE leads ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMP"
                     ))

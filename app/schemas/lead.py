@@ -56,7 +56,9 @@ class LeadResponse(BaseModel):
     language: str
     status: str  # "new", "in_progress", "done", "cancelled" — для CRM
     created_at: datetime
+    updated_at: Optional[datetime] = None  # для сортировки
     last_comment: Optional[str] = None  # preview последнего комментария (до 100 символов)
+    last_message_preview: Optional[str] = None  # для мобильных карточек
     lead_number: Optional[int] = None  # CRM v2: порядковый номер лида
     tenant_id: Optional[int] = None
     assigned_user_id: Optional[int] = None
@@ -252,3 +254,23 @@ class AssignByRangeResponse(BaseModel):
     assigned: int = 0
     skipped: int = 0
     details: list[dict] = []
+
+
+# ========== API Response Schemas ==========
+
+class LeadListResponse(BaseModel):
+    """Response for GET /api/leads with pagination."""
+    ok: bool = True
+    leads: list[LeadResponse]
+    total: int
+    page: int = 1
+    limit: int = 50
+    request_id: str
+
+
+class LeadStatsResponse(BaseModel):
+    """Response for GET /api/leads/stats."""
+    ok: bool = True
+    stats: dict[str, int]  # {"new": 15, "in_progress": 8, "done": 42, "cancelled": 3, "total": 68}
+    last_updated: datetime
+    request_id: str

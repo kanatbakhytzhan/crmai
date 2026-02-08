@@ -9,9 +9,8 @@ from sqlalchemy import select
 from pydantic import BaseModel
 import logging
 
-from app.api.deps import get_db
+from app.api.deps import get_db, get_current_user
 from app.database.models import Lead, User
-from app.api.dependencies import get_current_user
 from app.services.followup_scheduler import cancel_followups_for_lead, schedule_followups_for_lead
 
 router = APIRouter(prefix="/leads", tags=["leads"])

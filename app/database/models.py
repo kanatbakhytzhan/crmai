@@ -35,6 +35,13 @@ class Tenant(Base):
     followup_template_ru = Column(Text, nullable=True)  # RU template with {name} placeholders
     followup_template_kz = Column(Text, nullable=True)  # KZ template
     
+    # Owner-Managed Pipelines: Welcome sequence settings
+    website_url = Column(String(512), nullable=True)
+    welcome_voice_ru_url = Column(String(1024), nullable=True)
+    welcome_voice_kz_url = Column(String(1024), nullable=True)
+    welcome_photo_urls = Column(JSON, nullable=True)  # array of URLs ["https://...", ...]
+    welcome_sequence_enabled = Column(Boolean, default=True, nullable=False)
+    
     created_at = Column(DateTime, default=datetime.utcnow)
 
     whatsapp_accounts = relationship("WhatsAppAccount", back_populates="tenant", cascade="all, delete-orphan")
@@ -42,6 +49,7 @@ class Tenant(Base):
     pipelines = relationship("Pipeline", back_populates="tenant", cascade="all, delete-orphan")
     integrations = relationship("TenantIntegration", back_populates="tenant", cascade="all, delete-orphan")
     lead_categories = relationship("LeadCategory", back_populates="tenant", cascade="all, delete-orphan")
+    stages = relationship("TenantStage", back_populates="tenant", cascade="all, delete-orphan")
 
 
 class TenantUser(Base):
@@ -350,6 +358,11 @@ class Lead(Base):
     last_outbound_at = Column(DateTime, nullable=True)  # last message TO client
     handoff_mode = Column(String(16), default='ai', nullable=False)  # 'ai' | 'human'
     extracted_fields = Column(JSON, nullable=True)  # structured data: {name, city, house params, etc.}
+    
+    # Owner-Managed Pipelines: Stage tracking
+    stage_key = Column(String(64), nullable=True, index=True)  # current stage from tenant_stages
+    stage_updated_at = Column(DateTime, nullable=True)
+    stage_auto_moved = Column(Boolean, nullable=True)  # true if AI moved, false if manual
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -492,6 +505,26 @@ class LeadFollowup(Base):
     # Relationships
     lead = relationship("Lead", backref="followups")
     tenant = relationship("Tenant", backref="followups")
+
+
+class TenantStage(Base):
+    """Owner-managed pipeline stage (Kanban column)"""
+    __tablename__ = "tenant_stages"
+    __table_args__ = (UniqueConstraint("tenant_id", "key", name="uq_tenant_stage_key"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    key = Column(String(64), nullable=False)  # no_reply, in_work, wants_call, etc.
+    title_ru = Column(String(255), nullable=False)  # "Нет ответа"
+    title_kz = Column(String(255), nullable=False)  # "Zhauap zhok"
+    order_index = Column(Integer, default=0, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    color = Column(String(32), nullable=True)  # #FF5733
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    tenant = relationship("Tenant", back_populates="stages")
 
 
 class TenantCategoryStageMapping(Base):

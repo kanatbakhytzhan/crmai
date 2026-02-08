@@ -18,7 +18,7 @@ from starlette.middleware.sessions import SessionMiddleware
 import uuid
 
 from app.database.session import init_db, drop_all_tables, engine, sync_engine, Base
-from app.api.endpoints import chat, auth, admin_users, admin_tenants, admin_diagnostics, admin_recovery, whatsapp_webhook, chatflow_webhook, me, leads_v2, pipelines, tasks, events, notifications, admin_import, admin_reports, admin_auto_assign, admin_universal, lead_categories, leads, worker_health
+from app.api.endpoints import chat, auth, admin_users, admin_tenants, admin_diagnostics, admin_recovery, whatsapp_webhook, chatflow_webhook, me, leads_v2, pipelines, tasks, events, notifications, admin_import, admin_reports, admin_auto_assign, admin_universal, lead_categories, leads, worker_health, tenant_stages
 from app.services.telegram_service import stop_bot
 from app.admin import setup_admin
 
@@ -26,7 +26,7 @@ from app.admin import setup_admin
 # Без этого импорта таблицы не будут созданы!
 from app.database.models import (
     User, BotUser, Message, Lead, LeadComment, LeadEvent, AutoAssignRule, Tenant, TenantUser, WhatsAppAccount,
-    TenantIntegration, TenantPipelineMapping, TenantFieldMapping, LeadCategory,
+    TenantIntegration, TenantPipelineMapping, TenantFieldMapping, LeadCategory, TenantStage,
     Conversation, ConversationMessage, ChatMute, ChatAIState,
     Pipeline, PipelineStage, LeadTask, AIChatMute, AuditLog, Notification
 )
@@ -243,6 +243,7 @@ app.include_router(events.router, prefix="/api", tags=["Events"])
 app.include_router(notifications.router, prefix="/api", tags=["Notifications"])
 app.include_router(leads.router, prefix="/api", tags=["Leads"])  # Phase E: Handoff endpoint
 app.include_router(worker_health.router, prefix="/api", tags=["Worker Health"])  # Production monitoring
+app.include_router(tenant_stages.router, prefix="/api", tags=["Tenant Stages"])  # Owner-managed pipelines
 
 # Подключение админ-панели (используем СИНХРОННЫЙ engine!)
 setup_admin(app, sync_engine)

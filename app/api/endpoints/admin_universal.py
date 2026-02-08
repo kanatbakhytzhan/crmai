@@ -1087,28 +1087,261 @@ async def get_pipeline_mappings(
     return [PipelineMappingResponse.model_validate(m) for m in mappings]
 
 
-@router.put("/tenants/{tenant_id}/amocrm/pipeline-mapping", summary="Bulk upsert маппингов стадий")
+@router.put("/tenants/{tenant_id}/amocrm/pipeline-mapping", summary="Bulk upsert маппингов стадий (backward-compatible)")
 async def update_pipeline_mappings(
     tenant_id: int,
-    body: PipelineMappingBulkUpdate,
+    body: dict,  # Accept raw dict to handle any format
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Bulk upsert маппингов stage_key -> stage_id."""
+    """
+    Bulk upsert маппингов stage_key -> stage_id.
+    
+    Supports THREE payload formats for backward compatibility:
+    
+    Format 1 (current):
+        {
+            "mappings": [
+                {"stage_key": "NEW", "stage_id": "123", "pipeline_id": "789", "is_active": true},
+                {"stage_key": "IN_WORK", "stage_id": "456"}
+            ]
+        }
+    
+    Format 2 (legacy dict):
+        {
+            "mapping": {"NEW": "123", "IN_WORK": "456"},
+            "primary_pipeline_id": "789"
+        }
+    
+    Format 3 (legacy array):
+        {
+            "mapping": [
+                {"stage_key": "NEW", "stage_id": "123"},
+                {"stage_key": "IN_WORK", "stage_id": "456"}
+            ],
+            "primary_pipeline_id": "789"
+        }
+    
+    Normalization rules:
+    - Empty string ("") -> null
+    - Numbers -> strings
+    - Missing stage_id -> null (allowed for partial mapping)
+    """
     await _require_tenant_access(db, tenant_id, current_user)
-    results = []
-    for item in body.mappings:
-        m = await crud.upsert_pipeline_mapping(
-            db,
-            tenant_id=tenant_id,
-            provider="amocrm",
-            stage_key=item.stage_key,
-            stage_id=item.stage_id,
-            pipeline_id=item.pipeline_id,
-            is_active=item.is_active,
+    
+    # ========== Step 1: Normalize and extract mappings ==========
+    
+    normalized_mappings = []
+    primary_pipeline_id = None
+    
+    try:
+        # Extract primary_pipeline_id if present (legacy formats)
+        primary_pipeline_id = body.get("primary_pipeline_id")
+        if primary_pipeline_id == "":
+            primary_pipeline_id = None
+        elif primary_pipeline_id is not None:
+            primary_pipeline_id = str(primary_pipeline_id)
+        
+        # Format 1: {mappings: [...]}
+        if "mappings" in body:
+            raw_mappings = body["mappings"]
+            if not isinstance(raw_mappings, list):
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "ok": False,
+                        "detail": "Field 'mappings' must be an array",
+                        "code": "INVALID_MAPPINGS_FORMAT"
+                    }
+                )
+            
+            for idx, item in enumerate(raw_mappings):
+                if not isinstance(item, dict):
+                    return JSONResponse(
+                        status_code=422,
+                        content={
+                            "ok": False,
+                            "detail": f"Mapping item at index {idx} must be an object",
+                            "code": "INVALID_MAPPING_ITEM"
+                        }
+                    )
+                
+                stage_key = item.get("stage_key")
+                if not stage_key:
+                    return JSONResponse(
+                        status_code=422,
+                        content={
+                            "ok": False,
+                            "detail": f"Missing required field 'stage_key' in mapping item at index {idx}",
+                            "code": "MISSING_STAGE_KEY",
+                            "item_index": idx
+                        }
+                    )
+                
+                # Normalize stage_id
+                stage_id = item.get("stage_id")
+                if stage_id == "" or stage_id is None:
+                    stage_id = None
+                else:
+                    stage_id = str(stage_id)
+                
+                # Normalize pipeline_id
+                pipeline_id = item.get("pipeline_id")
+                if pipeline_id == "" or pipeline_id is None:
+                    pipeline_id = primary_pipeline_id  # Use primary if not specified
+                else:
+                    pipeline_id = str(pipeline_id)
+                
+                normalized_mappings.append({
+                    "stage_key": str(stage_key).strip(),
+                    "stage_id": stage_id,
+                    "pipeline_id": pipeline_id,
+                    "is_active": item.get("is_active", True)
+                })
+        
+        # Format 2 & 3: {mapping: {...} or [...], primary_pipeline_id: ...}
+        elif "mapping" in body:
+            raw_mapping = body["mapping"]
+            
+            # Format 2: dict
+            if isinstance(raw_mapping, dict):
+                for stage_key, stage_id in raw_mapping.items():
+                    if not stage_key or not isinstance(stage_key, str):
+                        continue  # Skip invalid keys
+                    
+                    # Normalize stage_id
+                    if stage_id == "" or stage_id is None:
+                        stage_id = None
+                    else:
+                        stage_id = str(stage_id)
+                    
+                    normalized_mappings.append({
+                        "stage_key": stage_key.strip(),
+                        "stage_id": stage_id,
+                        "pipeline_id": primary_pipeline_id,
+                        "is_active": True
+                    })
+            
+            # Format 3: array
+            elif isinstance(raw_mapping, list):
+                for idx, item in enumerate(raw_mapping):
+                    if not isinstance(item, dict):
+                        return JSONResponse(
+                            status_code=422,
+                            content={
+                                "ok": False,
+                                "detail": f"Mapping item at index {idx} must be an object",
+                                "code": "INVALID_MAPPING_ITEM"
+                            }
+                        )
+                    
+                    stage_key = item.get("stage_key")
+                    if not stage_key:
+                        return JSONResponse(
+                            status_code=422,
+                            content={
+                                "ok": False,
+                                "detail": f"Missing required field 'stage_key' in mapping item at index {idx}",
+                                "code": "MISSING_STAGE_KEY",
+                                "item_index": idx
+                            }
+                        )
+                    
+                    # Normalize stage_id
+                    stage_id = item.get("stage_id")
+                    if stage_id == "" or stage_id is None:
+                        stage_id = None
+                    else:
+                        stage_id = str(stage_id)
+                    
+                    # Normalize pipeline_id
+                    pipeline_id = item.get("pipeline_id")
+                    if pipeline_id == "" or pipeline_id is None:
+                        pipeline_id = primary_pipeline_id
+                    else:
+                        pipeline_id = str(pipeline_id)
+                    
+                    normalized_mappings.append({
+                        "stage_key": str(stage_key).strip(),
+                        "stage_id": stage_id,
+                        "pipeline_id": pipeline_id,
+                        "is_active": item.get("is_active", True)
+                    })
+            else:
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "ok": False,
+                        "detail": "Field 'mapping' must be an object or array",
+                        "code": "INVALID_MAPPING_FORMAT"
+                    }
+                )
+        else:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "ok": False,
+                    "detail": "Request body must contain either 'mappings' or 'mapping' field",
+                    "code": "MISSING_MAPPING_FIELD"
+                }
+            )
+    
+    except Exception as e:
+        print(f"[ERROR] Failed to parse pipeline mapping payload: {type(e).__name__}: {e}")
+        return JSONResponse(
+            status_code=422,
+            content={
+                "ok": False,
+                "detail": f"Invalid request format: {type(e).__name__}",
+                "code": "INVALID_REQUEST_FORMAT"
+            }
         )
-        results.append(PipelineMappingResponse.model_validate(m))
-    return {"ok": True, "count": len(results), "mappings": results}
+    
+    # ========== Step 2: Validate normalized mappings ==========
+    
+    if not normalized_mappings:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "ok": False,
+                "detail": "At least one mapping is required",
+                "code": "EMPTY_MAPPINGS"
+            }
+        )
+    
+    # ========== Step 3: Save to database ==========
+    
+    results = []
+    try:
+        for mapping in normalized_mappings:
+            m = await crud.upsert_pipeline_mapping(
+                db,
+                tenant_id=tenant_id,
+                provider="amocrm",
+                stage_key=mapping["stage_key"],
+                stage_id=mapping["stage_id"],
+                pipeline_id=mapping["pipeline_id"],
+                is_active=mapping["is_active"],
+            )
+            results.append(PipelineMappingResponse.model_validate(m))
+        
+        # Log success
+        print(f"[INFO] Pipeline mapping updated: tenant_id={tenant_id}, count={len(results)}, primary_pipeline_id={primary_pipeline_id}")
+        
+        return {"ok": True, "count": len(results), "mappings": results}
+    
+    except Exception as e:
+        print(f"[ERROR] Failed to save pipeline mappings for tenant {tenant_id}: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "detail": f"Failed to save mappings: {type(e).__name__}",
+                "code": "DATABASE_ERROR"
+            }
+        )
 
 
 # ========== Field Mappings ==========

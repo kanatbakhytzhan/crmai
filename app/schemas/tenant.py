@@ -270,9 +270,34 @@ class AmoPrimaryPipelineUpdate(BaseModel):
     pipeline_id: str = Field(..., description="ID основной воронки в AmoCRM")
 
 class AmoPipelineMappingUpdate(BaseModel):
-    """PUT /api/admin/tenants/{id}/amocrm/pipeline-mapping"""
+    """
+    DEPRECATED: Use PipelineMappingBulkUpdate instead.
+    This schema is kept for backward compatibility only.
+    """
     primary_pipeline_id: str = Field(..., description="ID основной воронки (пустая строка = сброс)")
     mapping: dict[str, str] | list[dict] = Field(..., description="Маппинг stage_key -> amo_stage_id. Support dict or list of {stage_key, stage_id}")
+
+
+class PipelineMappingFlexibleUpdate(BaseModel):
+    """
+    Flexible schema for pipeline mapping updates - supports multiple formats:
+    
+    Format 1 (current): {mappings: [{stage_key, stage_id, pipeline_id, is_active}]}
+    Format 2 (legacy dict): {mapping: {"NEW": "123", "IN_WORK": "456"}, primary_pipeline_id: "789"}
+    Format 3 (legacy array): {mapping: [{stage_key: "NEW", stage_id: "123"}], primary_pipeline_id: "789"}
+    
+    All formats are normalized to internal list[PipelineMappingItem]
+    """
+    # New format
+    mappings: Optional[list[PipelineMappingItem]] = None
+    
+    # Legacy format fields
+    mapping: Optional[dict[str, str] | list[dict]] = None
+    primary_pipeline_id: Optional[str] = None
+    
+    class Config:
+        extra = "allow"  # Allow extra fields from frontend without validation errors
+
 
 class AmoPipelineMappingResponse(BaseModel):
     """GET /api/admin/tenants/{id}/amocrm/pipeline-mapping"""

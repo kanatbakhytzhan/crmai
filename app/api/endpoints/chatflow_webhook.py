@@ -509,7 +509,16 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
             if old_category != new_category:
                 log.info("[CATEGORY] Lead %s: %s → %s (score=%s)", lead.id, old_category, new_category, new_score)
             
-            # TODO Phase C: Cancel followups if user replied
+            
+            # PHASE C: Cancel followups if user replied
+            from app.services.followup_scheduler import cancel_followups_for_lead
+            try:
+                cancelled_count = await cancel_followups_for_lead(db, lead.id)
+                if cancelled_count > 0:
+                    log.info("[FOLLOWUP] Cancelled %d followups for lead %s (user replied)", cancelled_count, lead.id)
+            except Exception as followup_err:
+                log.error("[FOLLOWUP] Error cancelling: %s", type(followup_err).__name__)
+            
             # TODO Phase D: Trigger AmoCRM sync if category changed
             
         except Exception as e:

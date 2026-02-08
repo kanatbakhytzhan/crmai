@@ -456,6 +456,65 @@ async def _process_webhook(db: AsyncSession, data: dict[str, Any], resolved_tena
     except Exception as e:
         log.error("[CHATFLOW] append_user_message error: %s", type(e).__name__, exc_info=True)
         return {"ok": True}
+    
+    # ============= PHASE B: Language Detection & Categorization =============
+    # Update lead with language, intents, timing, and category
+    if lead and user_text:
+        try:
+            from app.services.language_detector import detect_language
+            from app.services.intent_detector import extract_intents
+            from app.services.lead_categorization import categorize_lead, calculate_lead_score
+            from datetime import datetime as dt
+            
+            # 1. Detect language
+            detected_lang = detect_language(user_text)
+            if detected_lang in ('ru', 'kz') and getattr(lead, 'language', None) != detected_lang:
+                lead.language = detected_lang
+                log.info("[LANG] Lead %s language updated to %s", lead.id, detected_lang)
+            
+            # 2. Update last_inbound_at (message FROM client)
+            lead.last_inbound_at = dt.utcnow()
+            
+            # 3. Extract intents
+            lang_for_intent = getattr(lead, 'language', 'ru')
+            intents = extract_intents(user_text, lang_for_intent)
+            
+            # 4. Update extracted_fields with intents
+            current_extracted = getattr(lead, 'extracted_fields', None) or {}
+            if not isinstance(current_extracted, dict):
+                current_extracted = {}
+            
+            # Update wants_call intent if detected
+            if intents.get('wants_call'):
+                current_extracted['wants_call'] = 'yes'
+                log.info("[INTENT] Lead %s wants_call detected", lead.id)
+            
+            if intents.get('price_request'):
+                current_extracted['price_request'] = 'yes'
+            
+            lead.extracted_fields = current_extracted
+            
+            # 5. Recalculate category
+            old_category = getattr(lead, 'category', None)
+            new_category = categorize_lead(lead, current_extracted)
+            lead.category = new_category
+            
+            # 6. Recalculate score
+            new_score = calculate_lead_score(lead, current_extracted)
+            lead.lead_score = new_score
+            
+            await db.commit()
+            await db.refresh(lead)
+            
+            if old_category != new_category:
+                log.info("[CATEGORY] Lead %s: %s → %s (score=%s)", lead.id, old_category, new_category, new_score)
+            
+            # TODO Phase C: Cancel followups if user replied
+            # TODO Phase D: Trigger AmoCRM sync if category changed
+            
+        except Exception as e:
+            log.error("[CATEGORIZATION] Error processing lead %s: %s", getattr(lead, 'id', '?'), type(e).__name__, exc_info=True)
+    # ============= END PHASE B =============
 
     phone_from_jid = remote_jid.split("@")[0] if "@" in remote_jid else remote_jid
     normalized_in_message = _normalize_phone(user_text)

@@ -173,8 +173,9 @@ async def process_pending_followup(db: AsyncSession, followup: LeadFollowup):
 
 
 async def run_followup_worker():
-  async def main():
-    """Main worker loop - processes pending followups every 60 seconds"""
+    """
+    Main worker loop: check for pending followups every 60 seconds and process them
+    """
     
     # Import health endpoint update function
     try:

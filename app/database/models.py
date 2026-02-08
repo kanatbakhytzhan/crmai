@@ -28,6 +28,13 @@ class Tenant(Base):
     ai_after_lead_submitted_behavior = Column(String(64), default="polite_close", nullable=True)  # polite_close | continue | silent
     amocrm_base_domain = Column(String(255), nullable=True)  # e.g. "baxa.amocrm.ru" for AmoCRM integration
     default_pipeline_id = Column(String(64), nullable=True)  # ID основной воронки AmoCRM
+    
+    # AI CRM Manager: Auto-followup settings
+    followup_enabled = Column(Boolean, default=True, nullable=False)
+    followup_delays_minutes = Column(JSON, nullable=True)  # [5, 30] - delay sequence in minutes
+    followup_template_ru = Column(Text, nullable=True)  # RU template with {name} placeholders
+    followup_template_kz = Column(Text, nullable=True)  # KZ template
+    
     created_at = Column(DateTime, default=datetime.utcnow)
 
     whatsapp_accounts = relationship("WhatsAppAccount", back_populates="tenant", cascade="all, delete-orphan")
@@ -336,6 +343,14 @@ class Lead(Base):
     category_color = Column(String(32), nullable=True)  # #FF5733
     category_order = Column(Integer, nullable=True)  # для сортировки в UI
 
+    # AI CRM Manager fields
+    category = Column(String(64), nullable=True)  # no_reply, wants_call, partial_data, full_data, etc.
+    lead_score = Column(String(32), nullable=True)  # hot, warm, cold
+    last_inbound_at = Column(DateTime, nullable=True)  # last message FROM client
+    last_outbound_at = Column(DateTime, nullable=True)  # last message TO client
+    handoff_mode = Column(String(16), default='ai', nullable=False)  # 'ai' | 'human'
+    extracted_fields = Column(JSON, nullable=True)  # structured data: {name, city, house params, etc.}
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -446,17 +461,56 @@ class AuditLog(Base):
 
 
 class Notification(Base):
-    """In-app уведомления (lead_created, assigned_to, ...)."""
+    """Уведомления для пользователей (вместо legacy MessageQueue)."""
     __tablename__ = "notifications"
 
     id = Column(Integer, primary_key=True, index=True)
-    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    type = Column(String(64), nullable=False)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True)
+    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=True)
+    type = Column(String(64), nullable=True)
     title = Column(String(255), nullable=True)
     body = Column(Text, nullable=True)
-    is_read = Column(Boolean, default=False, nullable=False)
+    is_read = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class LeadFollowup(Base):
+    """Track scheduled auto-followup messages for leads"""
+    __tablename__ = "lead_followups"
+
+    id = Column(Integer, primary_key=True, index=True)
+    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=False, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    scheduled_at = Column(DateTime, nullable=False, index=True)  # when to send
+    sent_at = Column(DateTime, nullable=True)  # NULL if not sent yet
+    followup_number = Column(Integer, nullable=False)  # 1, 2, 3...
+    template_used = Column(Text, nullable=True)  # actual text sent
+    status = Column(String(32), default='pending', nullable=False)  # pending, sent, cancelled
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    lead = relationship("Lead", backref="followups")
+    tenant = relationship("Tenant", backref="followups")
+
+
+class TenantCategoryStageMapping(Base):
+    """Map local lead categories to AmoCRM pipeline stages"""
+    __tablename__ = "tenant_category_stage_mappings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False, index=True)
+    category = Column(String(64), nullable=False)  # no_reply, wants_call, partial_data, full_data, etc.
+    stage_key = Column(String(64), nullable=False)  # NEW, IN_WORK, WON, etc.
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint('tenant_id', 'category', name='uq_tenant_category_mapping'),
+    )
+
+    # Relationships
+    tenant = relationship("Tenant", backref="category_stage_mappings")
     lead_id = Column(Integer, ForeignKey("leads.id"), nullable=True)
 
 

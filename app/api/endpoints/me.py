@@ -98,7 +98,16 @@ async def get_me_ai_settings(
     Настройки AI для tenant текущего пользователя.
     Tenant: первый из tenant_users, иначе tenant где default_owner_user_id == current_user.id.
     """
-    tenant = await crud.get_tenant_for_me(db, current_user.id)
+    import logging
+    log = logging.getLogger(__name__)
+    try:
+        tenant = await crud.get_tenant_for_me(db, current_user.id)
+    except Exception as e:
+        log.error("[ME] get_ai_settings error: %s", type(e).__name__, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="tenant_not_found",
+        )
     if not tenant:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -119,7 +128,16 @@ async def patch_me_ai_settings(
     """
     Обновить ai_enabled для tenant текущего пользователя.
     """
-    tenant = await crud.get_tenant_for_me(db, current_user.id)
+    import logging
+    log = logging.getLogger(__name__)
+    try:
+        tenant = await crud.get_tenant_for_me(db, current_user.id)
+    except Exception as e:
+        log.error("[ME] patch_ai_settings error: %s", type(e).__name__, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="tenant_not_found",
+        )
     if not tenant:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

@@ -284,15 +284,30 @@ async def get_leads(
     - request_id: UUID запроса
     """
     from app.api.error_handler import get_request_id
+    import logging
+    log = logging.getLogger(__name__)
     
     settings = get_settings()
     multitenant = (getattr(settings, "multitenant_enabled", "false") or "false").upper() == "TRUE"
     
     # Получить все лиды пользователя
-    if multitenant:
-        all_leads = await crud.get_leads_for_user_crm(db, user_id=current_user.id)
-    else:
-        all_leads = await crud.get_user_leads(db, owner_id=current_user.id, multitenant_include_tenant_leads=False)
+    try:
+        if multitenant:
+            all_leads = await crud.get_leads_for_user_crm(db, user_id=current_user.id)
+        else:
+            all_leads = await crud.get_user_leads(db, owner_id=current_user.id, multitenant_include_tenant_leads=False)
+    except Exception as e:
+        request_id = get_request_id(request)
+        log.error("[LEADS] load failed: %s", type(e).__name__, exc_info=True)
+        return {
+            "ok": False,
+            "leads": [],
+            "total": 0,
+            "page": page,
+            "limit": limit,
+            "request_id": request_id,
+            "error": "leads_load_failed",
+        }
     
     # Фильтрация по статусу
     if status:
@@ -342,11 +357,19 @@ async def get_leads(
         item = LeadResponse.model_validate(l).model_dump()
         
         # Последний комментарий (preview)
-        last_c = await crud.get_last_lead_comment(db, l.id)
+        try:
+            last_c = await crud.get_last_lead_comment(db, l.id)
+        except Exception as e:
+            log.warning("[LEADS] last_comment failed lead_id=%s err=%s", l.id, type(e).__name__)
+            last_c = None
         item["last_comment"] = (last_c.text[:100] if last_c and last_c.text else None) if last_c else None
         
         # Последнее сообщение из conversation (для мобильных карточек)
-        last_msg = await crud.get_last_conversation_message(db, l.id)
+        try:
+            last_msg = await crud.get_last_conversation_message(db, l.id)
+        except Exception as e:
+            log.warning("[LEADS] last_message failed lead_id=%s err=%s", l.id, type(e).__name__)
+            last_msg = None
         item["last_message_preview"] = last_msg
         
         # Assigned user info
@@ -354,7 +377,11 @@ async def get_leads(
         item["assigned_to_user_id"] = aid
         item["assigned_at"] = getattr(l, "assigned_at", None)
         if aid:
-            u = await crud.get_user_by_id(db, aid)
+            try:
+                u = await crud.get_user_by_id(db, aid)
+            except Exception as e:
+                log.warning("[LEADS] assigned_user lookup failed user_id=%s err=%s", aid, type(e).__name__)
+                u = None
             if u:
                 item["assigned_user_email"] = u.email
                 item["assigned_user_name"] = getattr(u, "company_name", None)
@@ -559,14 +586,36 @@ async def update_lead_stage(
     Переместить лид в стадию воронки. Manager — только для лидов, назначенных ему.
     owner/rop/admin — для всех лидов tenant.
     """
+    import logging
+    from app.database.crud_stages import get_tenant_stage_by_id, get_tenant_stage_by_key
+
+    log = logging.getLogger(__name__)
     multitenant = (getattr(get_settings(), "multitenant_enabled", "false") or "false").upper() == "TRUE"
     lead = await crud.get_lead_by_id(db, lead_id, current_user.id, multitenant_include_tenant_leads=multitenant)
     if not lead or not lead.tenant_id:
         raise HTTPException(status_code=404, detail="Lead not found")
+
+    # Resolve stage_id from stage_key if provided
+    stage_id = getattr(body, "stage_id", None)
+    stage_key = (getattr(body, "stage_key", None) or "").strip()
+    if stage_key:
+        stage = await get_tenant_stage_by_key(db, lead.tenant_id, stage_key)
+        if not stage or not stage.is_active:
+            raise HTTPException(status_code=400, detail=f"Invalid stage_key: '{stage_key}'")
+        stage_id = stage.id
+    if stage_id is None:
+        raise HTTPException(status_code=400, detail="stage_id or stage_key is required")
+
+    # Validate stage_id belongs to tenant and is active
+    stage = await get_tenant_stage_by_id(db, stage_id, lead.tenant_id)
+    if not stage or not stage.is_active:
+        raise HTTPException(status_code=400, detail=f"Invalid stage_id: {stage_id}")
+
     role = await crud.get_tenant_user_role(db, lead.tenant_id, current_user.id)
     only_if_assigned_to_me = role == "manager"
+    log.info("[LEADS] Move lead %s to stage_id=%s stage_key=%s by user=%s role=%s", lead_id, stage_id, stage_key or stage.stage_key, current_user.id, role)
     updated = await crud.move_lead_stage(
-        db, lead_id, body.stage_id, current_user.id,
+        db, lead_id, stage_id, current_user.id,
         multitenant_include_tenant_leads=multitenant,
         only_if_assigned_to_me=only_if_assigned_to_me,
     )

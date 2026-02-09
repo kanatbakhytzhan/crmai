@@ -1,7 +1,7 @@
 """
 Pydantic схемы для Lead (заявка)
 """
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from datetime import datetime
 from typing import Optional, Literal
 from enum import Enum
@@ -194,7 +194,14 @@ class LeadPatchBody(BaseModel):
 
 class LeadStageBody(BaseModel):
     """PATCH /api/leads/{id}/stage — перемещение по воронке."""
-    stage_id: int
+    stage_id: Optional[int] = None
+    stage_key: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _validate_stage_selector(self):
+        if self.stage_id is None and not (self.stage_key or "").strip():
+            raise ValueError("stage_id or stage_key is required")
+        return self
 
 
 class LeadSelectionFilters(BaseModel):

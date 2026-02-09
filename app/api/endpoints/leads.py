@@ -133,6 +133,7 @@ async def change_lead_stage(
     """
     from app.database import crud
     from app.database.crud_stages import update_lead_stage, get_tenant_stage_by_key
+    log.info("[LEADS] change_lead_stage lead_id=%s stage_key=%s stage_id=%s user_id=%s", lead_id, getattr(body, "stage_key", None), getattr(body, "stage_id", None), current_user.id)
     
     # 1. Get lead
     lead = await crud.get_lead_by_id(db, lead_id, current_user.id, multitenant_include_tenant_leads=True)
@@ -142,19 +143,34 @@ async def change_lead_stage(
     if not lead.tenant_id:
         raise HTTPException(status_code=400, detail="Lead is not associated with a tenant")
         
-    # 2. Validate stage exists and is active
-    stage = await get_tenant_stage_by_key(db, lead.tenant_id, body.stage_key)
-    if not stage or not stage.is_active:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid stage_key: '{body.stage_key}' does not exist or is inactive"
-        )
+    # 2. Validate stage exists and is active (stage_key or stage_id)
+    stage_key = (getattr(body, "stage_key", None) or "").strip()
+    stage_id = getattr(body, "stage_id", None)
+    stage = None
+    if stage_key:
+        stage = await get_tenant_stage_by_key(db, lead.tenant_id, stage_key)
+        if not stage or not stage.is_active:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid stage_key: '{stage_key}' does not exist or is inactive"
+            )
+    elif stage_id:
+        from app.database.crud_stages import get_tenant_stage_by_id
+        stage = await get_tenant_stage_by_id(db, stage_id, lead.tenant_id)
+        if not stage or not stage.is_active:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid stage_id: {stage_id}"
+            )
+        stage_key = stage.stage_key
+    else:
+        raise HTTPException(status_code=400, detail="stage_id or stage_key is required")
         
     # 3. Update lead
     success = await update_lead_stage(
         db,
         lead_id=lead.id,
-        stage_key=body.stage_key,
+        stage_key=stage_key,
         auto_moved=False, # Manual move
         reason=body.reason or "Manual update via API"
     )

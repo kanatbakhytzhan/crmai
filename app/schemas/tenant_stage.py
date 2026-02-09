@@ -1,7 +1,7 @@
 """
 Pydantic schemas for TenantStage (owner-managed pipeline stages)
 """
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from datetime import datetime
 from typing import Optional
 
@@ -83,8 +83,15 @@ class TenantStagesResponse(BaseModel):
 
 class LeadStageUpdateBody(BaseModel):
     """Body for PATCH /api/leads/{id}/stage endpoint"""
-    stage_key: str = Field(..., min_length=1, max_length=64, description="Target stage key")
+    stage_key: Optional[str] = Field(None, min_length=1, max_length=64, description="Target stage key")
+    stage_id: Optional[int] = Field(None, ge=1, description="Target stage id (optional alternative)")
     reason: Optional[str] = Field(None, max_length=512, description="Reason for manual stage change")
+
+    @model_validator(mode="after")
+    def _validate_stage_selector(self):
+        if self.stage_id is None and not (self.stage_key or "").strip():
+            raise ValueError("stage_id or stage_key is required")
+        return self
     
     model_config = {
         "json_schema_extra": {

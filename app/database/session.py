@@ -739,6 +739,7 @@ async def init_db():
             # CRM v3: add category columns to leads
             try:
                 for col, defn in [
+                    ("category", "VARCHAR(64)"),
                     ("category_key", "VARCHAR(64)"),
                     ("category_label", "VARCHAR(255)"),
                     ("category_color", "VARCHAR(32)"),

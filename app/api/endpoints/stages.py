@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 import logging
 
-from app.api.dependencies import get_current_user
+from app.api.deps import get_current_user
 from app.api.deps import get_db
 from app.database.models import User, TenantUser
 from app.database import crud

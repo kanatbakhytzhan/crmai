@@ -344,21 +344,31 @@ async def get_user_leads(
         )
         return list(result.scalars().all())
     # Лиды владельца + лиды tenant (default_owner) + лиды tenant (tenant_users)
-    tenant_ids_default = select(Tenant.id).where(Tenant.default_owner_user_id == owner_id)
-    tenant_ids_member = select(TenantUser.tenant_id).where(TenantUser.user_id == owner_id)
-    result = await db.execute(
-        select(Lead)
-        .where(
-            or_(
-                Lead.owner_id == owner_id,
-                Lead.tenant_id.in_(tenant_ids_default),
-                Lead.tenant_id.in_(tenant_ids_member),
+    try:
+        tenant_ids_default = select(Tenant.id).where(Tenant.default_owner_user_id == owner_id)
+        tenant_ids_member = select(TenantUser.tenant_id).where(TenantUser.user_id == owner_id)
+        result = await db.execute(
+            select(Lead)
+            .where(
+                or_(
+                    Lead.owner_id == owner_id,
+                    Lead.tenant_id.in_(tenant_ids_default),
+                    Lead.tenant_id.in_(tenant_ids_member),
+                )
             )
+            .order_by(Lead.created_at.desc())
+            .limit(limit)
         )
-        .order_by(Lead.created_at.desc())
-        .limit(limit)
-    )
-    return list(result.scalars().all())
+        return list(result.scalars().all())
+    except Exception:
+        # Fallback if tenant tables are missing or inconsistent
+        result = await db.execute(
+            select(Lead)
+            .where(Lead.owner_id == owner_id)
+            .order_by(Lead.created_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())
 
 
 async def get_leads_for_user_crm(

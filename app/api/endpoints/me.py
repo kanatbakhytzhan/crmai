@@ -104,18 +104,16 @@ async def get_me_ai_settings(
         tenant = await crud.get_tenant_for_me(db, current_user.id)
     except Exception as e:
         log.error("[ME] get_ai_settings error: %s", type(e).__name__, exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="tenant_not_found",
-        )
+        tenant = None
     if not tenant:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="tenant_not_found",
+        # Return defaults instead of 404 to avoid breaking UI
+        return MeAISettingsResponse(
+            ai_enabled=True,
+            ai_prompt=None,
         )
     return MeAISettingsResponse(
-        tenant_id=tenant.id,
         ai_enabled=getattr(tenant, "ai_enabled", True),
+        ai_prompt=getattr(tenant, "ai_prompt", None),
     )
 
 
@@ -143,10 +141,10 @@ async def patch_me_ai_settings(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="tenant_not_found",
         )
-    updated = await crud.update_tenant(db, tenant.id, ai_enabled=body.ai_enabled)
+    updated = await crud.update_tenant(db, tenant.id, ai_enabled=body.ai_enabled, ai_prompt=body.ai_prompt)
     if not updated:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="tenant_not_found")
     return MeAISettingsResponse(
-        tenant_id=updated.id,
         ai_enabled=getattr(updated, "ai_enabled", True),
+        ai_prompt=getattr(updated, "ai_prompt", None),
     )

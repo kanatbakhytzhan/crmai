@@ -378,14 +378,20 @@ async def get_leads_for_user_crm(
         if lead.tenant_id is None:
             filtered.append(lead)
             continue
-        role = await get_tenant_user_role(db, lead.tenant_id, user_id)
+        try:
+            role = await get_tenant_user_role(db, lead.tenant_id, user_id)
+        except Exception:
+            role = None
         if role in ("owner", "rop"):
             filtered.append(lead)
         elif role == "manager":
             if getattr(lead, "assigned_user_id", None) == user_id:
                 filtered.append(lead)
         else:
-            if lead.owner_id == user_id:
+            # Fallbacks for users missing tenant_users record
+            if getattr(lead, "assigned_user_id", None) == user_id:
+                filtered.append(lead)
+            elif lead.owner_id == user_id:
                 filtered.append(lead)
     return filtered
 

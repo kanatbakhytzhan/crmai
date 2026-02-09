@@ -749,6 +749,9 @@ async def init_db():
                     ("last_outbound_at", "TIMESTAMP"),
                     ("handoff_mode", "VARCHAR(16)"),
                     ("extracted_fields", "JSON"),
+                    ("stage_key", "VARCHAR(64)"),
+                    ("stage_updated_at", "TIMESTAMP"),
+                    ("stage_auto_moved", "BOOLEAN"),
                 ]:
                     await conn.execute(text(f"ALTER TABLE leads ADD COLUMN IF NOT EXISTS {col} {defn}"))
                 await conn.execute(text(

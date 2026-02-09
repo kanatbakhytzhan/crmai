@@ -132,7 +132,7 @@ async def change_lead_stage(
     2. Target stage_key exists and is active for that tenant
     """
     from app.database import crud
-    from app.database.crud_stages import update_lead_stage, get_tenant_stage_by_key
+    from app.database.crud_stages import update_lead_stage, get_tenant_stage_by_key, get_tenant_stage_by_id, get_tenant_stages
     log.info("[LEADS] change_lead_stage lead_id=%s stage_key=%s stage_id=%s user_id=%s", lead_id, getattr(body, "stage_key", None), getattr(body, "stage_id", None), current_user.id)
     
     # 1. Get lead
@@ -147,24 +147,46 @@ async def change_lead_stage(
     stage_key = (getattr(body, "stage_key", None) or "").strip()
     stage_id = getattr(body, "stage_id", None)
     stage = None
-    if stage_key:
-        stage = await get_tenant_stage_by_key(db, lead.tenant_id, stage_key)
-        if not stage or not stage.is_active:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid stage_key: '{stage_key}' does not exist or is inactive"
-            )
-    elif stage_id:
-        from app.database.crud_stages import get_tenant_stage_by_id
+    tenant_stages = await get_tenant_stages(db, lead.tenant_id, active_only=True)
+    has_tenant_stages = len(tenant_stages) > 0
+
+    if stage_id:
         stage = await get_tenant_stage_by_id(db, stage_id, lead.tenant_id)
-        if not stage or not stage.is_active:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid stage_id: {stage_id}"
-            )
-        stage_key = stage.stage_key
+        if stage and stage.is_active:
+            stage_key = stage.stage_key
+        else:
+            # Fallback to stage_key if provided
+            if stage_key:
+                stage = await get_tenant_stage_by_key(db, lead.tenant_id, stage_key)
+                if stage and stage.is_active:
+                    stage_key = stage.stage_key
+                else:
+                    if has_tenant_stages:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Invalid stage_key: '{stage_key}' does not exist or is inactive"
+                        )
+            elif has_tenant_stages:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid stage_id: {stage_id}"
+                )
+    elif stage_key:
+        stage = await get_tenant_stage_by_key(db, lead.tenant_id, stage_key)
+        if stage and stage.is_active:
+            stage_key = stage.stage_key
+        else:
+            if has_tenant_stages:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid stage_key: '{stage_key}' does not exist or is inactive"
+                )
     else:
         raise HTTPException(status_code=400, detail="stage_id or stage_key is required")
+
+    # If tenant has no stages configured, allow any non-empty stage_key (frontend defaults)
+    if not has_tenant_stages and not stage_key:
+        raise HTTPException(status_code=400, detail="stage_key is required when no tenant stages configured")
         
     # 3. Update lead
     success = await update_lead_stage(
